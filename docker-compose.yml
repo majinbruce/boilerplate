@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    # The app retries the connection on boot anyway, but waiting for a healthy
+    # database keeps the logs free of alarming-but-expected errors.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PG_HOST: postgres
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DATABASE: app_db
+      # Must be exported in your shell. If it is missing, the Zod config schema
+      # refuses to boot rather than falling back to a placeholder secret.
+      JWT_SECRET: ${JWT_SECRET}
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
