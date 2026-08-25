@@ -13,6 +13,31 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build
 
+# ---- development -----------------------------------------------------------
+# Used by docker-compose. Node runs the TypeScript directly (type stripping),
+# so there is no build step and no compiled output to keep in sync — `node
+# --watch` reloads on save, and compose bind-mounts the source over /app so an
+# edit on the host is the edit the container sees.
+#
+# Dev dependencies are installed here because the development logger uses
+# pino-pretty. They never reach the runtime stage below.
+FROM node:24-alpine AS dev
+
+WORKDIR /app
+
+RUN apk add --no-cache dumb-init
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+ENV NODE_ENV=development
+EXPOSE 3000
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "--watch", "src/server.ts"]
+
 # ---- production dependencies ----------------------------------------------
 FROM node:24-alpine AS deps
 
