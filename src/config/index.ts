@@ -131,14 +131,11 @@ const envSchema = z.object({
  * dropping a cookie, or as an OAuth error only in production.
  */
 const envSchemaWithRules = envSchema
-  .refine(
-    (env) => Boolean(env.GOOGLE_CLIENT_ID) === Boolean(env.GOOGLE_CLIENT_SECRET),
-    {
-      path: ["GOOGLE_CLIENT_SECRET"],
-      message:
-        "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set together, or both left unset",
-    }
-  )
+  .refine((env) => Boolean(env.GOOGLE_CLIENT_ID) === Boolean(env.GOOGLE_CLIENT_SECRET), {
+    path: ["GOOGLE_CLIENT_SECRET"],
+    message:
+      "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set together, or both left unset",
+  })
   .refine(
     // Browsers ignore SameSite=None unless Secure is also set, so this pair
     // produces a session that silently never persists. Fail at boot instead.
