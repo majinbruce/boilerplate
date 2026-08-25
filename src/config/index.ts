@@ -33,6 +33,14 @@ loadEnvFile({
 });
 
 /**
+ * `z.coerce.boolean()` is the wrong tool for environment variables: it applies
+ * JavaScript truthiness, so the string "false" coerces to `true` and a flag you
+ * explicitly turned off silently stays on. Parsing the literal instead means a
+ * typo ("FALSE", "0", "no") is a boot-time error rather than a surprise.
+ */
+const envBoolean = z.enum(["true", "false"]).transform((value) => value === "true");
+
+/**
  * `z.coerce` is deliberate: every value out of process.env is a string, and
  * without coercion `PORT` would be "3000" and every numeric comparison in the
  * app would be subtly wrong.
@@ -60,6 +68,50 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
   JWT_EXPIRES_IN: z.string().default("1d"),
 
+  /* ---- Better Auth ------------------------------------------------------ */
+
+  // Signs session tokens and encrypts stored OAuth tokens. Same reasoning as
+  // JWT_SECRET: no default, because a boilerplate default becomes a production
+  // secret. Generate one with `npx auth@latest secret`.
+  BETTER_AUTH_SECRET: z
+    .string()
+    .min(32, "BETTER_AUTH_SECRET must be at least 32 characters"),
+
+  /**
+   * The public origin THIS API is reachable at. Better Auth builds the Google
+   * redirect URI from it, so if it is wrong you get `redirect_uri_mismatch` in
+   * production and nowhere else. It must match the origin registered in the
+   * Google Cloud Console exactly.
+   */
+  BETTER_AUTH_URL: z.url().default("http://localhost:3000"),
+
+  // Where the browser is sent after verification / reset / OAuth. The frontend
+  // passes the actual callbackURL per request; this is the origin we trust and
+  // the fallback the docs tell it to use.
+  FRONTEND_URL: z.url().default("http://localhost:3001"),
+
+  // Comma separated. Defaults to FRONTEND_URL, which is the same-origin case.
+  TRUSTED_ORIGINS: z.string().optional(),
+
+  // Both or neither — enforced below. Absent means the Google provider is not
+  // registered at all, so a fresh clone runs without any Google setup.
+  GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+  GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
+
+  // Seconds. 7 days, refreshed once a day of use.
+  AUTH_SESSION_EXPIRES_IN_S: z.coerce.number().int().positive().default(604_800),
+  AUTH_SESSION_UPDATE_AGE_S: z.coerce.number().int().nonnegative().default(86_400),
+
+  AUTH_REQUIRE_EMAIL_VERIFICATION: envBoolean.default(true),
+
+  // Absent means "secure in production, plain in development", which is what
+  // you want locally over http://.
+  COOKIE_SECURE: envBoolean.optional(),
+  COOKIE_SAME_SITE: z.enum(["lax", "strict", "none"]).default("lax"),
+  COOKIE_DOMAIN: z.string().min(1).optional(),
+
+  EMAIL_FROM: z.email().default("no-reply@localhost"),
+
   PG_HOST: z.string().min(1),
   PG_PORT: z.coerce.number().int().positive().default(5432),
   PG_USER: z.string().min(1),
@@ -73,7 +125,33 @@ const envSchema = z.object({
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
 });
 
-const parsed = envSchema.safeParse(process.env);
+/**
+ * Cross-field rules. These are the combinations that are individually valid but
+ * jointly broken — the kind that otherwise surface as a browser silently
+ * dropping a cookie, or as an OAuth error only in production.
+ */
+const envSchemaWithRules = envSchema
+  .refine(
+    (env) => Boolean(env.GOOGLE_CLIENT_ID) === Boolean(env.GOOGLE_CLIENT_SECRET),
+    {
+      path: ["GOOGLE_CLIENT_SECRET"],
+      message:
+        "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set together, or both left unset",
+    }
+  )
+  .refine(
+    // Browsers ignore SameSite=None unless Secure is also set, so this pair
+    // produces a session that silently never persists. Fail at boot instead.
+    (env) =>
+      env.COOKIE_SAME_SITE !== "none" ||
+      (env.COOKIE_SECURE ?? env.NODE_ENV === "production"),
+    {
+      path: ["COOKIE_SAME_SITE"],
+      message: "COOKIE_SAME_SITE=none requires COOKIE_SECURE=true",
+    }
+  );
+
+const parsed = envSchemaWithRules.safeParse(process.env);
 
 if (!parsed.success) {
   // Written straight to stderr: the logger itself depends on this config, so
@@ -117,6 +195,55 @@ export const config = {
   jwt: {
     secret: env.JWT_SECRET,
     expiresIn: env.JWT_EXPIRES_IN,
+  },
+
+  auth: {
+    secret: env.BETTER_AUTH_SECRET,
+    baseUrl: env.BETTER_AUTH_URL,
+
+    /**
+     * Not an env var on purpose. This string appears in three places that must
+     * agree: the Fastify prefix in app.ts, Better Auth's own router, and the
+     * redirect URI registered with Google. Making it configurable would let
+     * them drift, and the failure mode is an OAuth error in production only.
+     */
+    basePath: "/api/auth",
+
+    frontendUrl: env.FRONTEND_URL,
+
+    /**
+     * Every callbackURL / errorCallbackURL a client asks to be redirected to is
+     * checked against this list, which is what stops the auth endpoints from
+     * being an open redirect. Same-origin deploys need only the frontend.
+     */
+    trustedOrigins: (env.TRUSTED_ORIGINS ?? env.FRONTEND_URL)
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+
+    session: {
+      expiresIn: env.AUTH_SESSION_EXPIRES_IN_S,
+      updateAge: env.AUTH_SESSION_UPDATE_AGE_S,
+    },
+
+    requireEmailVerification: env.AUTH_REQUIRE_EMAIL_VERIFICATION,
+
+    // `null`, not `undefined` — an absent provider is a real state the factory
+    // branches on, and null makes that check explicit at the call site.
+    google:
+      env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
+        ? { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET }
+        : null,
+
+    cookie: {
+      secure: env.COOKIE_SECURE ?? isProduction,
+      sameSite: env.COOKIE_SAME_SITE,
+      // Spread rather than `undefined`: `exactOptionalPropertyTypes` treats an
+      // absent key and a key set to undefined as different types.
+      ...(env.COOKIE_DOMAIN === undefined ? {} : { domain: env.COOKIE_DOMAIN }),
+    },
+
+    emailFrom: env.EMAIL_FROM,
   },
 
   db: {
