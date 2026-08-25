@@ -9,7 +9,6 @@ import {
 } from "../../lib/api-response.ts";
 import * as userService from "./user.service.ts";
 import {
-  createUserBodySchema,
   listUsersQuerySchema,
   updateUserBodySchema,
   userDtoSchema,
@@ -20,7 +19,9 @@ const userEnvelope = successEnvelope(userDtoSchema);
 const commonErrors = { 400: errorEnvelope, 401: errorEnvelope, 500: errorEnvelope };
 
 /**
- * Everything in here is behind a bearer token. The hook is declared ONCE, and
+ * Everything in here is behind an authenticated session — carried by a cookie
+ * for the browser, or a bearer token for everything else; requireAuth resolves
+ * either transparently. The hook is declared ONCE, and
  * every route added to this scope inherits it — including routes added months
  * from now by someone who never reads this comment. That is the difference
  * from listing `authMiddleware` on each Express route: there, forgetting it is
@@ -35,7 +36,7 @@ const securedUserRoutes: FastifyPluginAsyncZod = async (app) => {
       schema: {
         tags: ["users"],
         summary: "List users",
-        security: [{ bearerAuth: [] }],
+        security: [{ cookieAuth: [] }, { bearerAuth: [] }],
         querystring: listUsersQuerySchema,
         response: { 200: paginatedEnvelope(userDtoSchema), ...commonErrors },
       },
@@ -54,7 +55,7 @@ const securedUserRoutes: FastifyPluginAsyncZod = async (app) => {
       schema: {
         tags: ["users"],
         summary: "Get a user by id",
-        security: [{ bearerAuth: [] }],
+        security: [{ cookieAuth: [] }, { bearerAuth: [] }],
         params: userIdParamSchema,
         response: { 200: userEnvelope, 404: errorEnvelope, ...commonErrors },
       },
@@ -73,7 +74,7 @@ const securedUserRoutes: FastifyPluginAsyncZod = async (app) => {
       schema: {
         tags: ["users"],
         summary: "Update a user",
-        security: [{ bearerAuth: [] }],
+        security: [{ cookieAuth: [] }, { bearerAuth: [] }],
         params: userIdParamSchema,
         body: updateUserBodySchema,
         response: {
@@ -101,8 +102,8 @@ const securedUserRoutes: FastifyPluginAsyncZod = async (app) => {
       preHandler: app.requireRole("admin"),
       schema: {
         tags: ["users"],
-        summary: "Soft-delete a user (admin only)",
-        security: [{ bearerAuth: [] }],
+        summary: "Delete a user and cascade their sessions (admin only)",
+        security: [{ cookieAuth: [] }, { bearerAuth: [] }],
         params: userIdParamSchema,
         response: {
           200: successEnvelope(z.null()),
@@ -121,28 +122,14 @@ const securedUserRoutes: FastifyPluginAsyncZod = async (app) => {
   );
 };
 
+/**
+ * There is no public POST here any more. An account comes into existence
+ * through Better Auth — /api/auth/sign-up/email or the Google flow — so this
+ * module is purely read-and-administer over the user table. A second creation
+ * path would mean a user row with no matching `accounts` row: a user who
+ * exists and can never sign in.
+ */
 const userRoutes: FastifyPluginAsyncZod = async (app) => {
-  // Public: this is how an account comes into existence.
-  app.post(
-    "/",
-    {
-      config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
-      schema: {
-        tags: ["users"],
-        summary: "Create a user",
-        body: createUserBodySchema,
-        response: { 201: userEnvelope, 409: errorEnvelope, ...commonErrors },
-      },
-    },
-    async (request, reply) => {
-      const ctx = { db: app.db, log: request.log };
-      const user = await userService.createUser(ctx, request.body);
-
-      reply.code(201);
-      return ok(user, "User created successfully");
-    }
-  );
-
   await app.register(securedUserRoutes);
 };
 

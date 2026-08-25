@@ -2,6 +2,7 @@ import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { fromNodeHeaders } from "better-auth/node";
 import { config } from "../../config/index.ts";
 import { errorEnvelope, ok, successEnvelope } from "../../lib/api-response.ts";
+import { badRequest } from "../../lib/errors.ts";
 import { requireUser } from "../../lib/require-user.ts";
 import { meDtoSchema } from "./auth.schemas.ts";
 
@@ -39,8 +40,15 @@ const authRoutes: FastifyPluginAsyncZod = async (app) => {
 
       try {
         done(null, JSON.parse(body as string) as unknown);
-      } catch (err) {
-        done(err as Error, undefined);
+      } catch {
+        /**
+         * A bare SyntaxError from JSON.parse carries no statusCode, so passing
+         * it straight through makes malformed JSON a 500. Fastify's stock
+         * parser raises FST_ERR_CTP_INVALID_JSON_BODY (a 400); replacing that
+         * parser means replacing that behaviour too, and badRequest() is this
+         * codebase's way of saying the same thing.
+         */
+        done(badRequest("Malformed JSON in request body"), undefined);
       }
     }
   );

@@ -1,14 +1,8 @@
-import bcrypt from "bcryptjs";
 import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../../plugins/db.ts";
-import { conflict, notFound, unauthorized } from "../../lib/errors.ts";
+import { notFound } from "../../lib/errors.ts";
 import * as repo from "./user.repository.ts";
-import type {
-  CreateUserBody,
-  ListUsersQuery,
-  UpdateUserBody,
-  UserDto,
-} from "./user.schemas.ts";
+import type { ListUsersQuery, UpdateUserBody, UserDto } from "./user.schemas.ts";
 
 /**
  * Services take their dependencies as an argument instead of importing a
@@ -21,27 +15,14 @@ export interface Ctx {
   log: FastifyBaseLogger;
 }
 
-const SALT_ROUNDS = 12;
-
 /**
  * Business rules live here, not in the route. The route only declares its
  * schemas and formats the response; this decides what is allowed.
+ *
+ * There is no createUser and no verifyCredentials any more: both belonged to
+ * the hand-rolled JWT flow, and both are now Better Auth's job. Nothing in this
+ * file hashes, compares or even sees a password.
  */
-export const createUser = async (
-  { db, log }: Ctx,
-  { name, email, password, role }: CreateUserBody
-): Promise<UserDto> => {
-  const existing = await repo.findByEmailWithSecret(db, email);
-
-  if (existing) throw conflict("A user with this email already exists");
-
-  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-  const row = await repo.insert(db, { name, email, passwordHash, role });
-
-  log.info({ userId: row.id }, "user-created");
-
-  return repo.toDto(row);
-};
 
 export const getUser = async ({ db }: Ctx, id: string): Promise<UserDto> => {
   const row = await repo.findById(db, id);
@@ -71,59 +52,26 @@ export const listUsers = async (
 export const updateUser = async (
   { db, log }: Ctx,
   id: string,
-  { name, email }: UpdateUserBody
+  { name, role }: UpdateUserBody
 ): Promise<UserDto> => {
-  if (email) {
-    const owner = await repo.findByEmailWithSecret(db, email);
-
-    // Allow re-submitting the same email; block taking someone else's.
-    if (owner && owner.id !== id) {
-      throw conflict("A user with this email already exists");
-    }
-  }
-
   const row = await repo.update(db, id, {
     ...(name === undefined ? {} : { name }),
-    ...(email === undefined ? {} : { email }),
+    ...(role === undefined ? {} : { role }),
   });
 
   if (!row) throw notFound("User not found");
 
-  log.info({ userId: id }, "user-updated");
+  log.info({ userId: id, role }, "user-updated");
 
   return repo.toDto(row);
 };
 
 export const deleteUser = async ({ db, log }: Ctx, id: string): Promise<void> => {
-  const deletedId = await repo.softDelete(db, id);
+  const deletedId = await repo.remove(db, id);
 
   if (!deletedId) throw notFound("User not found");
 
-  log.info({ userId: id }, "user-deleted");
-};
-
-/**
- * Verifies credentials for the login route. The generic message is deliberate:
- * distinguishing "no such user" from "wrong password" hands an attacker a
- * free account-enumeration oracle.
- */
-export const verifyCredentials = async (
-  { db, log }: Ctx,
-  email: string,
-  password: string
-) => {
-  const row = await repo.findByEmailWithSecret(db, email);
-
-  // Comparing against a dummy hash when the user is absent keeps the timing of
-  // both branches roughly equal.
-  const hash =
-    row?.password_hash ?? "$2b$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinva";
-  const matches = await bcrypt.compare(password, hash);
-
-  if (!row || !matches) {
-    log.warn({ email }, "login-failed");
-    throw unauthorized("Invalid email or password");
-  }
-
-  return { id: row.id, email: row.email, role: row.role };
+  // Worth an explicit log line: the cascade also destroyed this user's sessions
+  // and unlinked their providers.
+  log.info({ userId: id }, "user-deleted (sessions and linked accounts cascaded)");
 };

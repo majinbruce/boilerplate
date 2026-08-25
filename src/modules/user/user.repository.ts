@@ -7,23 +7,27 @@ import type { UserDto } from "./user.schemas.ts";
  * constrained to QueryResultRow (an index signature) and TypeScript only gives
  * type aliases an implicit index signature.
  *
- * This is the whole "no ORM" position in one file — the SQL is the source of
- * truth and the row type is the hand-written contract for what it returns.
- * db.query<UserRow>() then makes every downstream property access checked.
+ * The table these read is owned by Better Auth — db/migrations/0001 creates it
+ * and Better Auth writes to it during sign-up. Reading it with plain SQL is
+ * fine and is the point of sharing one database; what this module must NOT do
+ * is write anything Better Auth has invariants about (email, and the password
+ * that lives over on `accounts`).
  */
 export type UserRow = {
   id: string;
   name: string;
   email: string;
+  email_verified: boolean;
+  image: string | null;
   role: "user" | "admin";
   created_at: Date;
-  updated_at: Date | null;
+  updated_at: Date;
 };
-
-export type UserWithSecretRow = UserRow & { password_hash: string };
 
 // Table names are built from config, never from user input.
 const USERS = `${config.db.schema}.users`;
+
+const COLUMNS = "id, name, email, email_verified, image, role, created_at, updated_at";
 
 /**
  * Every query is parameterised ($1, $2, ...). String interpolation of user
@@ -31,26 +35,9 @@ const USERS = `${config.db.schema}.users`;
  */
 
 export const findById = async (db: Database, id: string): Promise<UserRow | null> => {
-  const sql = `
-    SELECT id, name, email, role, created_at, updated_at
-    FROM ${USERS}
-    WHERE id = $1 AND deleted_at IS NULL`;
+  const sql = `SELECT ${COLUMNS} FROM ${USERS} WHERE id = $1`;
 
   const { rows } = await db.query<UserRow>(sql, [id]);
-  return rows[0] ?? null;
-};
-
-/** Returns the password hash too — only the login path may call this. */
-export const findByEmailWithSecret = async (
-  db: Database,
-  email: string
-): Promise<UserWithSecretRow | null> => {
-  const sql = `
-    SELECT id, name, email, role, password_hash, created_at, updated_at
-    FROM ${USERS}
-    WHERE email = $1 AND deleted_at IS NULL`;
-
-  const { rows } = await db.query<UserWithSecretRow>(sql, [email.toLowerCase()]);
   return rows[0] ?? null;
 };
 
@@ -63,11 +50,10 @@ export const list = async (
   { limit, offset, search }: { limit: number; offset: number; search?: string }
 ): Promise<{ rows: UserRow[]; total: number }> => {
   const sql = `
-    SELECT id, name, email, role, created_at, updated_at,
+    SELECT ${COLUMNS},
            COUNT(*) OVER() AS total_count
     FROM ${USERS}
-    WHERE deleted_at IS NULL
-      AND ($3::text IS NULL OR name ILIKE '%' || $3 || '%' OR email ILIKE '%' || $3 || '%')
+    WHERE ($3::text IS NULL OR name ILIKE '%' || $3 || '%' OR email ILIKE '%' || $3 || '%')
     ORDER BY created_at DESC
     LIMIT $1 OFFSET $2`;
 
@@ -83,32 +69,6 @@ export const list = async (
   return { rows, total };
 };
 
-export const insert = async (
-  db: Database,
-  {
-    name,
-    email,
-    passwordHash,
-    role,
-  }: { name: string; email: string; passwordHash: string; role: "user" | "admin" }
-): Promise<UserRow> => {
-  const sql = `
-    INSERT INTO ${USERS} (name, email, password_hash, role)
-    VALUES ($1, $2, $3, $4)
-    RETURNING id, name, email, role, created_at, updated_at`;
-
-  const { rows } = await db.query<UserRow>(sql, [
-    name,
-    email.toLowerCase(),
-    passwordHash,
-    role,
-  ]);
-
-  // RETURNING on a successful INSERT always yields exactly one row; the
-  // non-null assertion is the one place that fact is asserted.
-  return rows[0]!;
-};
-
 /**
  * COALESCE lets one statement handle a partial update — absent fields are
  * passed as null and leave the existing column untouched.
@@ -116,32 +76,33 @@ export const insert = async (
 export const update = async (
   db: Database,
   id: string,
-  { name, email }: { name?: string; email?: string }
+  { name, role }: { name?: string; role?: "user" | "admin" }
 ): Promise<UserRow | null> => {
   const sql = `
     UPDATE ${USERS}
     SET name       = COALESCE($2, name),
-        email      = COALESCE($3, email),
+        role       = COALESCE($3, role),
         updated_at = NOW()
-    WHERE id = $1 AND deleted_at IS NULL
-    RETURNING id, name, email, role, created_at, updated_at`;
+    WHERE id = $1
+    RETURNING ${COLUMNS}`;
 
-  const { rows } = await db.query<UserRow>(sql, [
-    id,
-    name ?? null,
-    email?.toLowerCase() ?? null,
-  ]);
+  const { rows } = await db.query<UserRow>(sql, [id, name ?? null, role ?? null]);
 
   return rows[0] ?? null;
 };
 
-// Soft delete — history stays intact and the row can be restored.
-export const softDelete = async (db: Database, id: string): Promise<string | null> => {
-  const sql = `
-    UPDATE ${USERS}
-    SET deleted_at = NOW()
-    WHERE id = $1 AND deleted_at IS NULL
-    RETURNING id`;
+/**
+ * A hard delete, where this used to be a soft one.
+ *
+ * Soft delete and Better Auth do not mix: its session lookup does not know
+ * about a deleted_at column, so a "deleted" user would keep authenticating
+ * with an existing session and could still sign in. The ON DELETE CASCADE on
+ * sessions and accounts means removing the row also revokes every session and
+ * unlinks every provider, which is the behaviour deleting an account should
+ * have had anyway.
+ */
+export const remove = async (db: Database, id: string): Promise<string | null> => {
+  const sql = `DELETE FROM ${USERS} WHERE id = $1 RETURNING id`;
 
   const { rows } = await db.query<{ id: string }>(sql, [id]);
   return rows[0]?.id ?? null;
@@ -156,7 +117,9 @@ export const toDto = (row: UserRow): UserDto => ({
   id: row.id,
   name: row.name,
   email: row.email,
+  emailVerified: row.email_verified,
+  image: row.image,
   role: row.role,
   createdAt: row.created_at.toISOString(),
-  updatedAt: row.updated_at?.toISOString() ?? null,
+  updatedAt: row.updated_at.toISOString(),
 });
