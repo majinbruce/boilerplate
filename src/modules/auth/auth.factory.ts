@@ -237,6 +237,8 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
         idToken: "id_token",
         accessTokenExpiresAt: "access_token_expires_at",
         refreshTokenExpiresAt: "refresh_token_expires_at",
+        createdAt: "created_at",
+        updatedAt: "updated_at",
       },
 
       accountLinking: {

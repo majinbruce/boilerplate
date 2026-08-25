@@ -110,7 +110,7 @@ const envSchema = z.object({
   COOKIE_SAME_SITE: z.enum(["lax", "strict", "none"]).default("lax"),
   COOKIE_DOMAIN: z.string().min(1).optional(),
 
-  EMAIL_FROM: z.email().default("no-reply@localhost"),
+  EMAIL_FROM: z.email().default("no-reply@example.com"),
 
   PG_HOST: z.string().min(1),
   PG_PORT: z.coerce.number().int().positive().default(5432),
