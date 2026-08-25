@@ -288,6 +288,25 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
       useSecureCookies: config.auth.cookie.secure,
 
       /**
+       * Pinned to false ON PURPOSE — do not delete this line as redundant.
+       *
+       * Left unset, Better Auth derives it as `isTest() ? true : false`, and
+       * isTest() is just `NODE_ENV === "test"`. So the default quietly turns
+       * OFF origin validation — the check that rejects a state-changing request
+       * carrying cookies from an untrusted origin, and the one that stops
+       * callbackURL being an open redirect — in any process started with
+       * NODE_ENV=test.
+       *
+       * That is convenient for suites that do not want to send an Origin
+       * header, and it is exactly the wrong trade here: it means the CSRF
+       * behaviour could not be tested, and a misconfigured NODE_ENV would
+       * silently disable a security control. Setting it explicitly makes the
+       * rule identical in every environment; the test helpers send a real
+       * Origin header, as a browser would.
+       */
+      disableOriginCheck: false,
+
+      /**
        * httpOnly is the whole point of the cookie path: the session token is
        * unreadable from JavaScript, so an XSS bug cannot exfiltrate it. That is
        * the security difference between this and a token in localStorage, and
@@ -322,7 +341,14 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
      * share of the limit.
      */
     rateLimit: {
-      enabled: true,
+      /**
+       * Off in tests only. The limits below are deliberately tight enough that
+       * a suite creating a dozen accounts would trip them, and a test suite
+       * fighting the rate limiter tests the rate limiter rather than the thing
+       * it meant to. Upstream's own default is production-only; this keeps it
+       * on in development too, so a misconfiguration shows up before deploy.
+       */
+      enabled: !config.isTest,
       storage: "memory",
       customRules: {
         "/sign-in/email": { window: 60, max: 5 },

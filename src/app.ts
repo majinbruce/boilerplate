@@ -6,6 +6,7 @@ import {
   type ZodTypeProvider,
 } from "fastify-type-provider-zod";
 import { config } from "./config/index.ts";
+import type { Mailer } from "./lib/mailer.ts";
 
 import configPlugin from "./plugins/config.ts";
 import errorHandlerPlugin from "./plugins/error-handler.ts";
@@ -25,7 +26,12 @@ import userRoutes from "./modules/user/user.routes.ts";
  * more: an app that isn't listening can still be sent real HTTP requests in
  * memory via app.inject(), which is how the whole test suite works.
  */
-export async function buildApp() {
+export interface BuildAppOptions {
+  /** Injected by the tests; production uses the console mailer by default. */
+  mailer?: Mailer;
+}
+
+export async function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     // The old request_id_middleware, in one option. Honour an upstream id when
     // a gateway already assigned one, so a trace survives the hop.
@@ -103,7 +109,11 @@ export async function buildApp() {
   await app.register(errorHandlerPlugin);
   await app.register(dbPlugin);
   await app.register(securityPlugin);
-  await app.register(authPlugin);
+  // Spread rather than passing `undefined`: exactOptionalPropertyTypes treats
+  // an absent key and a key set to undefined as different types.
+  await app.register(authPlugin, {
+    ...(options.mailer === undefined ? {} : { mailer: options.mailer }),
+  });
 
   if (!config.isProduction) {
     await app.register(swaggerPlugin);

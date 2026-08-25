@@ -1,4 +1,5 @@
 import { buildApp, type App } from "../src/app.ts";
+import type { Mailer } from "../src/lib/mailer.ts";
 
 /**
  * Builds an app that never listens on a port. app.inject() pushes a real
@@ -9,8 +10,8 @@ import { buildApp, type App } from "../src/app.ts";
  * The pg pool connects lazily, so everything that fails before touching the
  * database (validation, auth, 404s) is testable with no database running.
  */
-export const buildTestApp = async (): Promise<App> => {
-  const app = await buildApp();
+export const buildTestApp = async (mailer?: Mailer): Promise<App> => {
+  const app = await buildApp(mailer === undefined ? {} : { mailer });
   await app.ready();
   return app;
 };

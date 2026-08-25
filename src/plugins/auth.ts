@@ -2,7 +2,7 @@ import fp from "fastify-plugin";
 import { fromNodeHeaders } from "better-auth/node";
 import type { onRequestHookHandler, preHandlerHookHandler } from "fastify";
 import { createAuth, type Auth } from "../modules/auth/auth.factory.ts";
-import { createConsoleMailer } from "../lib/mailer.ts";
+import { createConsoleMailer, type Mailer } from "../lib/mailer.ts";
 import { requireUser } from "../lib/require-user.ts";
 import { forbidden, unauthorized } from "../lib/errors.ts";
 
@@ -35,8 +35,17 @@ declare module "fastify" {
   }
 }
 
-export default fp(
-  async (app) => {
+export interface AuthPluginOptions {
+  /**
+   * Overrides the console mailer. The tests pass a fake so they can read the
+   * verification and reset tokens straight out of the message instead of
+   * running a mail server — which is the entire reason Mailer is an interface.
+   */
+  mailer?: Mailer;
+}
+
+export default fp<AuthPluginOptions>(
+  async (app, opts) => {
     /**
      * The live instance. Note what it is given: the application's own pool, so
      * Better Auth shares the connections, the error handling and the shutdown
@@ -47,7 +56,7 @@ export default fp(
      */
     const auth = createAuth({
       pool: app.db.pool,
-      mailer: createConsoleMailer(app.log),
+      mailer: opts.mailer ?? createConsoleMailer(app.log),
       log: app.log,
     });
 
