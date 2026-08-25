@@ -17,7 +17,9 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "format": "prettier --write \"**/*.{ts,json,md}\""
+    "format": "prettier --write \"**/*.{ts,json,md}\"",
+    "auth:schema": "npx auth@latest generate --config src/lib/auth.ts",
+    "auth:secret": "npx auth@latest secret"
   },
   "dependencies": {
     "@fastify/compress": "^9.2.0",

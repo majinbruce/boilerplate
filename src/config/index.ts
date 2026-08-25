@@ -65,9 +65,9 @@ const envSchema = z.object({
 
   /* ---- Better Auth ------------------------------------------------------ */
 
-  // Signs session tokens and encrypts stored OAuth tokens. Same reasoning as
-  // JWT_SECRET: no default, because a boilerplate default becomes a production
-  // secret. Generate one with `npx auth@latest secret`.
+  // Signs session tokens and encrypts stored OAuth tokens. No default, on
+  // purpose: a boilerplate that ships with a fallback secret is how "change-me"
+  // ends up signing production sessions. Generate one with `npm run auth:secret`.
   BETTER_AUTH_SECRET: z
     .string()
     .min(32, "BETTER_AUTH_SECRET must be at least 32 characters"),

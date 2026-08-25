@@ -13,7 +13,7 @@ import { z } from "zod";
  *   - `ok`/`paginated` produce the object a handler returns.
  *
  * The serializer only emits fields the schema declares, so a field that leaks
- * into a handler's return value (a password_hash, an internal flag) is dropped
+ * into a handler's return value (a password hash, an internal flag) is dropped
  * on the way out rather than shipped to the client.
  */
 
