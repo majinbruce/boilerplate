@@ -63,11 +63,6 @@ const envSchema = z.object({
     .default(15 * 60 * 1000),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
 
-  // No default. A boilerplate that ships with a fallback JWT secret is how
-  // "change-me" ends up signing production tokens.
-  JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
-  JWT_EXPIRES_IN: z.string().default("1d"),
-
   /* ---- Better Auth ------------------------------------------------------ */
 
   // Signs session tokens and encrypts stored OAuth tokens. Same reasoning as
@@ -187,11 +182,6 @@ export const config = {
   rateLimit: {
     windowMs: env.RATE_LIMIT_WINDOW_MS,
     max: env.RATE_LIMIT_MAX,
-  },
-
-  jwt: {
-    secret: env.JWT_SECRET,
-    expiresIn: env.JWT_EXPIRES_IN,
   },
 
   auth: {

@@ -19,8 +19,20 @@ export default fp(
           version: "1.0.0",
         },
         components: {
+          /**
+           * Two transports for one session. `cookieAuth` is what a browser uses
+           * and is set automatically by the sign-in endpoints; `bearerAuth`
+           * carries the very same session token for clients that cannot hold
+           * cookies. Neither is a JWT — the token is an opaque key into the
+           * sessions table.
+           */
           securitySchemes: {
-            bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+            cookieAuth: {
+              type: "apiKey",
+              in: "cookie",
+              name: "better-auth.session_token",
+            },
+            bearerAuth: { type: "http", scheme: "bearer" },
           },
         },
       },

@@ -1,65 +1,122 @@
 import fp from "fastify-plugin";
-import fastifyJwt from "@fastify/jwt";
+import { fromNodeHeaders } from "better-auth/node";
 import type { onRequestHookHandler, preHandlerHookHandler } from "fastify";
-import { config } from "../config/index.ts";
-import { forbidden } from "../lib/errors.ts";
+import { createAuth, type Auth } from "../modules/auth/auth.factory.ts";
+import { createConsoleMailer } from "../lib/mailer.ts";
+import { requireUser } from "../lib/require-user.ts";
+import { forbidden, unauthorized } from "../lib/errors.ts";
 
-export interface AuthUser {
-  id: string;
-  email: string;
-  role: "user" | "admin";
-}
-
-/** Tells TypeScript what request.user actually holds after jwtVerify(). */
-declare module "@fastify/jwt" {
-  interface FastifyJWT {
-    payload: AuthUser;
-    user: AuthUser;
-  }
-}
+/**
+ * The shapes Better Auth resolves a request into. Both are DERIVED from the
+ * configuration in auth.factory.ts rather than written out here, so adding an
+ * `additionalFields` entry there updates `request.user` with no second edit —
+ * `role` arrives through exactly this path.
+ */
+export type AuthUser = Auth["$Infer"]["Session"]["user"];
+export type AuthSession = Auth["$Infer"]["Session"]["session"];
 
 declare module "fastify" {
   interface FastifyInstance {
-    /** onRequest hook: verifies the bearer token and populates request.user. */
-    authenticate: onRequestHookHandler;
-    /** preHandler factory: run *after* authenticate, gates on role. */
+    /** The Better Auth instance. Routes reach the server-side API through it. */
+    auth: Auth;
+    /** onRequest hook: resolves a session from a cookie OR a bearer token. */
+    requireAuth: onRequestHookHandler;
+    /** preHandler factory: run *after* requireAuth, gates on role. */
     requireRole: (...roles: AuthUser["role"][]) => preHandlerHookHandler;
-    signToken: (user: AuthUser) => string;
+  }
+
+  interface FastifyRequest {
+    /**
+     * Null until `requireAuth` runs, and on every route that does not use it.
+     * Use `requireUser(request)` inside a guarded handler to narrow it.
+     */
+    user: AuthUser | null;
+    session: AuthSession | null;
   }
 }
 
 export default fp(
   async (app) => {
-    await app.register(fastifyJwt, {
-      secret: config.jwt.secret,
-      sign: { expiresIn: config.jwt.expiresIn },
+    /**
+     * The live instance. Note what it is given: the application's own pool, so
+     * Better Auth shares the connections, the error handling and the shutdown
+     * path that plugins/db.ts already owns.
+     *
+     * The console mailer is the default. Swapping in a real provider is one
+     * line here — implement `Mailer` and pass it instead.
+     */
+    const auth = createAuth({
+      pool: app.db.pool,
+      mailer: createConsoleMailer(app.log),
+      log: app.log,
+    });
+
+    app.decorate("auth", auth);
+
+    /**
+     * Fastify needs to know these properties exist before the first request, so
+     * the request object keeps a stable shape (a hidden-class optimisation, but
+     * also the reason `request.user` is defined rather than missing on routes
+     * that never authenticate).
+     */
+    app.decorateRequest("user", null);
+    app.decorateRequest("session", null);
+
+    /**
+     * ======================================================================
+     * Where the cookie path and the bearer path converge — and it is one call.
+     * ======================================================================
+     *
+     * `getSession` is handed the request's headers and works out the rest. It
+     * looks for the session cookie; the `bearer()` plugin registered in the
+     * factory additionally teaches it to look at `Authorization: Bearer`. Both
+     * carry the same opaque token, and both resolve to the SAME row in the
+     * `sessions` table.
+     *
+     * So there is no branch here on client type, no second token format and no
+     * parallel user model. A mobile client differs from the browser only in
+     * where it stores the string it was given at sign-in.
+     *
+     * The lookup hits Postgres on every request. That is the deliberate cost of
+     * sessions being revocable — see the cookieCache note in auth.factory.ts.
+     */
+    app.decorate("requireAuth", async function requireAuth(request) {
+      const resolved = await auth.api.getSession({
+        // Fastify's headers are Node's IncomingHttpHeaders; Better Auth speaks
+        // the WHATWG Headers type. This is the adapter between them.
+        headers: fromNodeHeaders(request.headers),
+      });
+
+      if (!resolved) {
+        // AppError, so the standard error envelope and the standard log line
+        // apply — an unauthenticated request looks like every other 401.
+        throw unauthorized("Authentication required");
+      }
+
+      request.user = resolved.user;
+      request.session = resolved.session;
     });
 
     /**
-     * Decorated rather than exported, so routes reach it as `app.authenticate`
-     * and never import across module boundaries to get it. The Express version
-     * of this had to be listed on every single route; here a route group opts
-     * in once with `app.addHook("onRequest", app.authenticate)`.
-     *
-     * jwtVerify throws FST_JWT_* errors that already carry a 401, and the
-     * error handler turns them into the standard envelope. Nothing about the
-     * token is ever logged.
+     * Unchanged in shape from the JWT version it replaces, so route files that
+     * used it keep working: authentication is a scope-wide onRequest hook,
+     * authorisation is a per-route preHandler that runs after validation.
      */
-    app.decorate("authenticate", async function authenticate(request) {
-      await request.jwtVerify();
-    });
-
     app.decorate(
       "requireRole",
       (...roles: AuthUser["role"][]): preHandlerHookHandler =>
         async function requireRole(request) {
-          if (!roles.includes(request.user.role)) {
+          const user = requireUser(request);
+
+          if (!roles.includes(user.role)) {
             throw forbidden("You do not have permission to perform this action");
           }
         }
     );
-
-    app.decorate("signToken", (user: AuthUser) => app.jwt.sign({ ...user }));
   },
-  { name: "auth" }
+  {
+    name: "auth",
+    // Better Auth is handed app.db.pool, so the pool must exist first.
+    dependencies: ["db"],
+  }
 );

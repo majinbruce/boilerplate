@@ -27,7 +27,7 @@ const commonErrors = { 400: errorEnvelope, 401: errorEnvelope, 500: errorEnvelop
  * a silent public endpoint; here, forgetting it is impossible.
  */
 const securedUserRoutes: FastifyPluginAsyncZod = async (app) => {
-  app.addHook("onRequest", app.authenticate);
+  app.addHook("onRequest", app.requireAuth);
 
   app.get(
     "/",

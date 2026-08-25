@@ -101,9 +101,11 @@ const normalize = (err: FastifyError): Normalized => {
       break;
   }
 
-  // @fastify/jwt reports every token problem with a FST_JWT_* code and a 401
-  // already set. Anything else with a 4xx that reached here came from Fastify
-  // itself, so its message is safe to pass through.
+  // Anything with a 4xx that reached here came from Fastify itself (or from an
+  // AppError thrown by requireAuth/requireRole, handled above), so its message
+  // is safe to pass through. Better Auth's own endpoints never reach this
+  // handler: they return their own Response, which the catch-all forwards
+  // verbatim.
   const statusCode = err.statusCode ?? 500;
 
   return {

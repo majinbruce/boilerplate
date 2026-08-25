@@ -39,7 +39,15 @@ export default fp(
     await app.register(rateLimit, {
       max: config.rateLimit.max,
       timeWindow: config.rateLimit.windowMs,
-      // Authenticated callers are limited per user, anonymous ones per IP.
+      /**
+       * Per IP in practice. This plugin is registered before the auth plugin,
+       * so its onRequest hook runs before any session has been resolved and
+       * `request.user` is still null here — the fallback is the normal path,
+       * not the exception. Kept as-is because a route that resolves its session
+       * in an earlier hook would benefit, and because bucketing by IP is the
+       * correct default for the unauthenticated endpoints that actually need
+       * rate limiting.
+       */
       keyGenerator: (request) => request.user?.id ?? request.ip,
       errorResponseBuilder: (request, context) => ({
         statusCode: -1,

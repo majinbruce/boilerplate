@@ -112,7 +112,16 @@ export async function buildApp() {
   // The URL prefix lives here, not inside the route files — so a module can be
   // remounted at a different version without editing it.
   await app.register(healthRoutes, { prefix: "/health" });
-  await app.register(authRoutes, { prefix: "/api/v1/auth" });
+
+  /**
+   * Deliberately NOT /api/v1/auth. This prefix has to agree with Better Auth's
+   * own basePath, with the Better Auth client SDK's default, and with the
+   * redirect URI registered in the Google Cloud Console — so versioning it
+   * would turn a routine API version bump into a Google Console change and a
+   * breaking change for every SDK consumer. It is a documented exception to
+   * the /api/v1 convention, and config.auth.basePath is its single source.
+   */
+  await app.register(authRoutes, { prefix: config.auth.basePath });
   await app.register(userRoutes, { prefix: "/api/v1/users" });
 
   return app;

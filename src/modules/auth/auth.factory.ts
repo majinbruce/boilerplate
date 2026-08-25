@@ -189,7 +189,15 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
          */
         role: {
           type: ["user", "admin"],
-          required: false,
+          /**
+           * `required: true` alongside `input: false` is the combination that
+           * makes `request.user.role` a plain "user" | "admin" instead of
+           * `| null | undefined`. It is honest rather than convenient: the
+           * column is NOT NULL, and because the value is server-owned with a
+           * default, it is always populated on create — the field is required
+           * of the *database*, never of the caller.
+           */
+          required: true,
           defaultValue: "user",
           input: false,
         },

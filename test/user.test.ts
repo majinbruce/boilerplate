@@ -44,37 +44,11 @@ describe("user routes", () => {
     ]);
   });
 
-  it("rejects an invalid uuid in the path", async () => {
-    const token = app.signToken({
-      id: "00000000-0000-4000-8000-000000000000",
-      email: "admin@example.com",
-      role: "admin",
-    });
-
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/users/not-a-uuid",
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    expect(res.statusCode).toBe(400);
-  });
-
-  it("blocks a non-admin from deleting, after authenticating them", async () => {
-    const token = app.signToken({
-      id: "00000000-0000-4000-8000-000000000000",
-      email: "user@example.com",
-      role: "user",
-    });
-
-    const res = await app.inject({
-      method: "DELETE",
-      url: "/api/v1/users/00000000-0000-4000-8000-000000000001",
-      headers: { authorization: `Bearer ${token}` },
-    });
-
-    expect(res.statusCode).toBe(403);
-  });
+  /**
+   * The cases that need an authenticated caller (path validation behind the
+   * guard, and role gating) moved to test/integration/, because a session is
+   * now a row in Postgres rather than a signature this process can mint.
+   */
 
   it("rejects a malformed JSON body with 400, not 500", async () => {
     const res = await app.inject({
