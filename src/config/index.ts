@@ -107,6 +107,12 @@ const envSchema = z.object({
 
   EMAIL_FROM: z.email().default("no-reply@example.com"),
 
+  // Branding. Appears in the auth emails and as Better Auth's appName. Safe to
+  // change at any time: cookie names come from `cookiePrefix`, which is the
+  // literal "better-auth" and does NOT derive from this — so renaming the app
+  // does not sign everybody out.
+  APP_NAME: z.string().min(1).max(60).default("Acme"),
+
   PG_HOST: z.string().min(1),
   PG_PORT: z.coerce.number().int().positive().default(5432),
   PG_USER: z.string().min(1),
@@ -231,6 +237,7 @@ export const config = {
     },
 
     emailFrom: env.EMAIL_FROM,
+    appName: env.APP_NAME,
   },
 
   db: {

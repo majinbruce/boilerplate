@@ -80,6 +80,7 @@ src/
     *.repository.ts      SQL and row types
     *.service.ts         business rules, dependencies passed in
     *.routes.ts          schema declarations and thin handlers
+    auth.emails.ts       the verification / reset templates (content, not wiring)
   app.ts                 builds the app (does NOT listen)
   server.ts              listens, waits for the DB, handles signals
 db/migrations/           plain .sql files
@@ -216,6 +217,62 @@ defence. Browsers always send one; `curl` and test helpers must be told to.
 Note that `advanced.disableOriginCheck` is pinned to `false` in the factory
 **on purpose**: left unset, Better Auth turns origin validation off whenever
 `NODE_ENV=test`, and a security control should not vary by environment.
+
+## Transactional email
+
+Better Auth never sends mail itself — it builds the URL and hands it to a
+callback. Everything after that is ours, split in two:
+
+| File                              | Owns                                                                                     |
+| --------------------------------- | ---------------------------------------------------------------------------------------- |
+| `src/lib/mailer.ts`               | the `Mailer` interface and the console dev implementation — _how_ a message is delivered |
+| `src/modules/auth/auth.emails.ts` | the verification and reset templates — _what_ the message says and looks like            |
+
+The split is the point: rewording an email should not be a diff against your
+auth configuration, and swapping Resend for SES should not touch a template.
+
+**The templates are production-shaped, not placeholders.** Table-based layout
+with inline styles (Gmail strips `<style>`; Outlook's renderer predates
+flexbox), every colour stated explicitly, a padded `<a>` as the button rather
+than an image, a preheader line, and a plain-text alternative that carries the
+same link. The raw URL is always printed under the button, because corporate
+mail scanners rewrite and strip links and that is the user's only fallback.
+
+No template engine. Two transactional emails do not justify MJML or Handlebars,
+and a boilerplate should not pick yours.
+
+Rebranding is `APP_NAME`, plus the `THEME` object at the top of
+`auth.emails.ts`. Changing `APP_NAME` is safe at any time — cookie names come
+from `cookiePrefix`, which does not derive from it, so a rename does not sign
+everyone out.
+
+### Going to production
+
+Implement one method and pass it where `createConsoleMailer(app.log)` is used in
+`plugins/auth.ts`:
+
+```ts
+const resendMailer: Mailer = {
+  send: async ({ to, subject, text, html }) => {
+    await resend.emails.send({
+      from: config.auth.emailFrom,
+      to,
+      subject,
+      text,
+      ...(html === undefined ? {} : { html }),
+    });
+  },
+};
+```
+
+The sender address is the implementation's business — it is transport config,
+and providers differ on whether it is per-message or per-account. Let a send
+failure throw; Better Auth logs it and the user can retry.
+
+> **User input reaches the inbox.** `name` is whatever someone typed at sign-up,
+> and with account linking it can arrive in an inbox that is not theirs. Every
+> interpolated value is escaped, and there is a test asserting a hostile display
+> name is escaped rather than injected. Keep that true if you edit the markup.
 
 ## Google OAuth setup
 

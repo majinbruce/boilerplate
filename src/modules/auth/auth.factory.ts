@@ -4,6 +4,7 @@ import { betterAuth } from "better-auth";
 import { bearer } from "better-auth/plugins";
 import { config } from "../../config/index.ts";
 import type { Mailer } from "../../lib/mailer.ts";
+import { passwordResetEmail, verificationEmail } from "./auth.emails.ts";
 
 /**
  * ============================================================================
@@ -65,7 +66,7 @@ export interface AuthDeps {
  */
 export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
   betterAuth({
-    appName: "api",
+    appName: config.auth.appName,
 
     /** The adapter. See the note above — this is the whole Postgres setup. */
     database: pool,
@@ -114,11 +115,15 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
        */
       revokeSessionsOnPasswordReset: true,
 
+      /**
+       * Better Auth builds the URL and hands it over; what the message looks
+       * like is entirely ours. Copy and markup live in auth.emails.ts so that
+       * rewording an email is not a diff against the auth configuration.
+       */
       sendResetPassword: async ({ user, url }) => {
         await mailer.send({
           to: user.email,
-          subject: "Reset your password",
-          text: `Reset your password with this link:\n\n${url}\n\nIf you did not request this, ignore this email.`,
+          ...passwordResetEmail({ name: user.name, url }),
         });
       },
     },
@@ -131,8 +136,7 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
       sendVerificationEmail: async ({ user, url }) => {
         await mailer.send({
           to: user.email,
-          subject: "Verify your email address",
-          text: `Confirm your email address with this link:\n\n${url}`,
+          ...verificationEmail({ name: user.name, url }),
         });
       },
     },
