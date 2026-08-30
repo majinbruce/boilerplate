@@ -9,6 +9,7 @@ import { config } from "./config/index.ts";
 import type { Mailer } from "./lib/mailer.ts";
 
 import configPlugin from "./plugins/config.ts";
+import lifecyclePlugin from "./plugins/lifecycle.ts";
 import errorHandlerPlugin from "./plugins/error-handler.ts";
 import dbPlugin from "./plugins/db.ts";
 import securityPlugin from "./plugins/security.ts";
@@ -137,6 +138,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
 
   await app.register(configPlugin);
+  await app.register(lifecyclePlugin);
   await app.register(errorHandlerPlugin);
   await app.register(dbPlugin);
   await app.register(securityPlugin);

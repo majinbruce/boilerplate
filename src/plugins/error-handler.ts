@@ -8,6 +8,7 @@ import { config } from "../config/index.ts";
 import { isAppError } from "../lib/errors.ts";
 import type { ErrorDetail } from "../lib/api-response.ts";
 import { redact } from "../lib/redact.ts";
+import { captureRequestError } from "../instrument.ts";
 
 interface Normalized {
   statusCode: number;
@@ -136,6 +137,24 @@ export default fp(
           },
           "request-failed"
         );
+
+        /**
+         * Only the unexpected ones. An operational error — a 400 from
+         * validation, a 404, a 409 from a unique constraint — is the API
+         * working correctly, and sending those to Sentry buys a quota bill and
+         * an alert channel nobody reads. What is left is genuinely "this
+         * shouldn't happen", which is exactly what you want to be paged about.
+         *
+         * Not awaited: the user's response does not wait on a third party.
+         */
+        if (!isOperational) {
+          captureRequestError(err, {
+            requestId: request.id,
+            method: request.method,
+            url: request.routeOptions.url ?? request.url,
+            userId: request.user?.id ?? "anonymous",
+          });
+        }
 
         // Never leak an unexpected error's message or stack in production.
         const safeToExpose = isOperational || !config.isProduction;

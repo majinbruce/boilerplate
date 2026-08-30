@@ -80,13 +80,22 @@ services:
       PG_HOST: postgres
       PG_PORT: 5432
       HOST: 0.0.0.0
+      # Fixed, and deliberately not left to the env files. The container side of
+      # the mapping below and the Dockerfile's EXPOSE both say 3000, and a PORT
+      # line in .env.development would move only the app — so it would listen on
+      # a port nothing is published to and the stack would come up unreachable.
+      # Move the HOST side with API_PUBLISHED_PORT instead.
+      PORT: 3000
     depends_on:
       postgres:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
     ports:
-      - "${PORT:-3000}:3000"
+      # Same rule as the database above: override API_PUBLISHED_PORT if you
+      # already have something on 3000. Only the host side moves — inside the
+      # container it is always 3000.
+      - "${API_PUBLISHED_PORT:-3000}:3000"
     volumes:
       # The source, live. `node --watch` reloads on save, so an edit on the
       # host takes effect without a rebuild.
@@ -94,6 +103,12 @@ services:
       # An anonymous volume pinned over the bind mount, so the container keeps
       # the node_modules that were installed for ITS platform instead of having
       # the host's (possibly different arch, possibly absent) shadow them.
+      #
+      # It also OUTLIVES `up --build`: rebuilding the image does not touch a
+      # volume that already exists, so after adding a dependency the container
+      # keeps mounting the old node_modules over the new image's and the app
+      # dies on ERR_MODULE_NOT_FOUND for a package that is plainly in
+      # package.json. `docker compose up -d --build -V` renews it.
       - /app/node_modules
 
 volumes:

@@ -327,10 +327,10 @@ Note that `advanced.disableOriginCheck` is pinned to `false` in the factory
 Better Auth never sends mail itself — it builds the URL and hands it to a
 callback. Everything after that is ours, split in two:
 
-| File                              | Owns                                                                                     |
-| --------------------------------- | ---------------------------------------------------------------------------------------- |
-| `src/lib/mailer.ts`               | the `Mailer` interface and the console dev implementation — _how_ a message is delivered |
-| `src/modules/auth/auth.emails.ts` | the verification and reset templates — _what_ the message says and looks like            |
+| File                              | Owns                                                                                                     |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `src/lib/mailer.ts`               | the `Mailer` interface, the console dev implementation and the Resend one — _how_ a message is delivered |
+| `src/modules/auth/auth.emails.ts` | the verification and reset templates — _what_ the message says and looks like                            |
 
 The split is the point: rewording an email should not be a diff against your
 auth configuration, and swapping Resend for SES should not touch a template.
@@ -350,28 +350,100 @@ Rebranding is `APP_NAME`, plus the `THEME` object at the top of
 from `cookiePrefix`, which does not derive from it, so a rename does not sign
 everyone out.
 
-### Going to production
+### Going to production: Resend
 
-Implement one method and pass it where `createConsoleMailer(app.log)` is used in
-`plugins/auth.ts`:
+Two environment variables, no code change:
 
-```ts
-const resendMailer: Mailer = {
-  send: async ({ to, subject, text, html }) => {
-    await resend.emails.send({
-      from: config.auth.emailFrom,
-      to,
-      subject,
-      text,
-      ...(html === undefined ? {} : { html }),
-    });
-  },
-};
+```bash
+MAIL_PROVIDER=resend
+RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxxxx
+EMAIL_FROM=no-reply@yourdomain.com     # must be on a domain verified in Resend
+EMAIL_REPLY_TO=support@yourdomain.com  # optional, but a no-reply that eats replies is rude
 ```
 
-The sender address is the implementation's business — it is transport config,
-and providers differ on whether it is per-message or per-account. Let a send
-failure throw; Better Auth logs it and the user can retry.
+`createMailer()` in `plugins/auth.ts` reads `MAIL_PROVIDER` and builds the
+matching implementation. `console` is the default so a fresh clone runs with no
+account anywhere; it is **refused at boot in production**, because a mailer that
+logs instead of sending does not fail — it succeeds while delivering every
+verification link to nobody.
+
+Before the first send: add your domain at
+[resend.com/domains](https://resend.com/domains) and publish the DNS records it
+gives you (SPF + DKIM, and DMARC if you want deliverability rather than
+delivery). `EMAIL_FROM` on an unverified domain comes back as
+`invalid_from_address`. `onboarding@resend.dev` needs no domain and is fine for
+one smoke test, but only delivers to your own account's address.
+
+Three things in `createResendMailer` are worth knowing about before you copy the
+pattern to another provider:
+
+- **The SDK does not throw on an API error.** It resolves with `{ data, error }`
+  and hands you the failure as a value, so the obvious `try { await send() }`
+  adapter reports every rejected message as sent, and the first symptom is a
+  user saying the email never arrived. The `error` branch is checked explicitly.
+- **Retries reuse one idempotency key per message.** Bounded — three attempts,
+  exponential backoff with jitter — because this runs inside the HTTP request
+  that triggered it. A request that reached Resend but failed on the way back is
+  retried without producing a second copy of the same verification email.
+- **Only errors a second identical request could fix are retried.** 429, 5xx,
+  network throws, a per-attempt timeout and `concurrent_idempotent_requests`
+  (409 — which the timeout itself provokes, since the abandoned attempt is
+  still in flight when the retry lands) yes. `validation_error`,
+  `invalid_from_address` and quota exhaustion, no: retrying those only delays
+  the error the caller needs to see.
+- **Each attempt is bounded at 5s.** The SDK takes no `AbortSignal`, so a hung
+  request is abandoned rather than cancelled, and Node's `fetch` would otherwise
+  wait minutes — inside the sign-up request. Three attempts plus backoff is a
+  ~16s worst case.
+
+Verified against the live API, not reasoned about: forcing all three attempts to
+be abandoned mid-flight sent three requests carrying one idempotency key and
+produced **exactly one delivered email**. The corollary is that failure
+reporting is one-sided — a timeout can log "delivery failed" for a message that
+was in fact delivered, because an abandoned request cannot be distinguished from
+a slow one. At-most-once is the property being defended; the log line means "we
+never saw it land".
+
+**One thing to know before you ship it, because it is Better Auth's behaviour
+and not something `mailer.ts` can change:** a failed verification email does
+**not** fail sign-up. `POST /sign-up/email` answers `200` whether or not the
+message went out, so a provider outage produces accounts that exist and can
+never be activated, with a success response in front of them. Verified against
+this codebase, not assumed:
+
+| Endpoint                        | Mailer throws                                                                                                         |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `POST /sign-up/email`           | still `200` — swallowed                                                                                               |
+| `POST /send-verification-email` | `500` — surfaced                                                                                                      |
+| `POST /request-password-reset`  | `200` neutral message, same as for an unknown address — so a send failure is not an account-enumeration oracle either |
+
+So the failure is only visible in your logs. That is why giving up logs at
+`ERROR` with `"email delivery failed — giving up"` before it throws: **alert on
+that line.** The user's own recourse is `POST /send-verification-email`, which
+does return the failure.
+
+### What this deliberately does not do
+
+Three gaps, listed so you find them here rather than in production. None blocks
+a side project; all three matter once real volume does.
+
+- **No bounce or complaint handling.** Resend can webhook `email.bounced` and
+  `email.complained` at you; nothing here consumes them, so a hard-bouncing
+  address is retried by users forever and your domain reputation pays for it.
+  Add a route and a suppression check if you send to addresses you did not
+  verify.
+- **Sends are inline, not queued.** The send happens inside the HTTP request
+  that triggered it, so a slow provider is a slow sign-up (bounded: three
+  attempts, 10s each). No outbox table, no worker — correct at low volume, and
+  the thing to replace first if email ever becomes a bulk concern.
+- **No open/click tracking, no templates in Resend.** The markup is ours (see
+  `auth.emails.ts`), which is the point.
+
+Swapping in SES, Postmark or SMTP is one more `Mailer` in `mailer.ts` and one
+more arm in `createMailer` — plus a value in the `MAIL_PROVIDER` enum in
+`config/index.ts`. Nothing else in the app knows which one is running, which is
+also why the test suite can inject a fake (`buildTestApp(fakeMailer)`) and read
+verification tokens straight out of the message.
 
 > **User input reaches the inbox.** `name` is whatever someone typed at sign-up,
 > and with account linking it can arrive in an inbox that is not theirs. Every
@@ -380,21 +452,49 @@ failure throw; Better Auth logs it and the user can retry.
 
 ## Deploying
 
-Two settings are boot-enforced in production, because both fail silently and
+Four settings are boot-enforced in production, because each fails silently and
 expensively otherwise. The app refuses to start without them:
 
-| Variable       | Why it is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CORS_ORIGINS` | `*` is rejected. CORS runs with `credentials: true`, so the wildcard reflects the caller's Origin **and** tells the browser to send cookies — any site a signed-in user visits can read authenticated responses. `SameSite=lax` blunts it; the split-origin deploy this README documents (`COOKIE_SAME_SITE=none`) removes that mitigation. List your frontend origins.                                                                                            |
-| `TRUST_PROXY`  | Must be set. It is how far `X-Forwarded-For` is trusted, and therefore what `request.ip` is — which is the rate-limit key in front of sign-in and password reset. `1` behind a single nginx/ALB/Cloudflare; a CIDR for specific peers; `false` only if the process is exposed directly. Blanket `true` is deliberately not the default: it trusts that header from anybody, so a client reaching the app directly can name its own IP and walk around the limiter. |
+| Variable             | Why it is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CORS_ORIGINS`       | `*` is rejected. CORS runs with `credentials: true`, so the wildcard reflects the caller's Origin **and** tells the browser to send cookies — any site a signed-in user visits can read authenticated responses. `SameSite=lax` blunts it; the split-origin deploy this README documents (`COOKIE_SAME_SITE=none`) removes that mitigation. List your frontend origins.                                                                                            |
+| `TRUST_PROXY`        | Must be set. It is how far `X-Forwarded-For` is trusted, and therefore what `request.ip` is — which is the rate-limit key in front of sign-in and password reset. `1` behind a single nginx/ALB/Cloudflare; a CIDR for specific peers; `false` only if the process is exposed directly. Blanket `true` is deliberately not the default: it trusts that header from anybody, so a client reaching the app directly can name its own IP and walk around the limiter. |
+| `BETTER_AUTH_SECRET` | The values committed to this repository (`.env.example`, `.env.test`) are rejected by exact match. The secret signs session tokens, so a deploy still running the dev default lets anyone who has read this repository mint a valid session for any user — and nothing about it looks wrong at runtime. `npm run auth:secret` generates a real one.                                                                                                                |
+| `MAIL_PROVIDER`      | `console` is rejected. It logs messages instead of sending them, so it does not error — it succeeds while every verification and password-reset link goes nowhere. Set `resend` and `RESEND_API_KEY`.                                                                                                                                                                                                                                                              |
 
 The rest of the pre-flight list:
 
-- `BETTER_AUTH_SECRET` — a real one (`npm run auth:secret`), never the committed dev default.
 - `BETTER_AUTH_URL` — the public origin of this API. Getting it wrong is `redirect_uri_mismatch`, and only in the environment whose value is wrong.
-- A real `Mailer`. The console mailer logs the verification link instead of sending it, so nobody can activate an account.
+- `MAIL_PROVIDER=resend` and `RESEND_API_KEY`, with `EMAIL_FROM` on a domain verified in Resend. Boot-enforced: the console mailer logs the verification link instead of sending it, so nobody could activate an account.
 - `npm run create-admin` — until you run it there is no admin, and every admin-only route is unreachable. See [The first administrator](#the-first-administrator).
-- Build the Dockerfile's `runtime` stage. `docker-compose.yml` is development only.
+- Build the Dockerfile's `runtime` stage. `docker-compose.yml` is development only; `compose.prod.yml` is below.
+
+Two more that are optional but worth setting on a real deploy:
+
+- `SHUTDOWN_DRAIN_MS` — defaults to `5000` in production, `0` locally. On
+  `SIGTERM` the process makes `/health/ready` return `503` **before** it closes
+  anything, waits this long, and only then shuts down. That gap is what a proxy
+  or orchestrator needs: it finds out this instance is going away by polling
+  readiness on an interval, so closing the socket immediately means every
+  request sent between the signal and the next poll is a connection reset for
+  the user and a 502 in the proxy log — on every deploy. Set it to a couple of
+  your health-check intervals. In-flight requests are unaffected either way;
+  `app.close()` already waits for them.
+- `SENTRY_DSN` — unset means Sentry is never initialised, nothing is sent, and
+  no socket is opened, which is the default. Set it and unexpected 500s and
+  crashes are reported with the request id, matched route and user id attached.
+  Operational errors (validation, 404, 409) are deliberately never sent: they
+  are the API working correctly, and reporting them buys a quota bill and an
+  alert channel nobody reads. `sendDefaultPii` is off, so headers and cookies —
+  the cookie header being a live session token — never leave the process.
+  `SENTRY_TRACES_SAMPLE_RATE` defaults to `0` (errors only) and
+  `APP_VERSION=$(git rev-parse --short HEAD)` makes a stack trace point at a
+  commit.
+
+`src/instrument.ts` is the first import in `server.ts` and has to stay there:
+Sentry instruments `http` and `pg` by patching them as they load, so an init
+that happens after those imports still reports errors but loses the request
+context on all of them. Nothing fails if it moves — that is why it is commented.
 
 One thing this list does **not** cover, because it is a decision rather than a
 setting: both rate limiters store their counters in memory. That is correct for
@@ -403,6 +503,47 @@ its own separate share of the limit, and a deploy resets every counter. Before
 you scale past one instance, move `@fastify/rate-limit` onto a Redis store and
 Better Auth's `rateLimit.storage` (in `auth.factory.ts`) to `"database"` or a
 secondary store.
+
+### On a single VPS
+
+```sh
+docker compose --env-file .env.production -f compose.prod.yml up -d --build
+```
+
+`--env-file` is required, and does two jobs: it fills the `${...}`
+interpolations in the file (Compose reads those only from the shell or
+`--env-file`, never from a service's own `env_file:`) and it is the same file
+the containers load. One file, so the Postgres superuser Compose creates and the
+credentials the app connects with cannot drift apart. Create
+`.env.production` on the server from `.env.example` — it is gitignored — and
+work through the pre-flight list above.
+
+It is a separate file rather than an override of `docker-compose.yml`, because
+an override can add to the dev file but cannot remove from it, and the two
+things that make the dev stack wrong in production are exactly removals: the
+bind mount of your source over `/app`, and the published Postgres port.
+
+Four details in that file are worth knowing before you edit it:
+
+- **The api publishes on `127.0.0.1` only**, with a reverse proxy (nginx,
+  Caddy) terminating TLS in front. Dropping the `127.0.0.1:` prefix does more
+  than expose a port: Docker writes its own iptables rules ahead of ufw's, so a
+  bare `3000:3000` is reachable from the internet while `ufw status` still says
+  it is not, and everything the proxy does — TLS, real client IPs for the rate
+  limiter — is bypassed with it.
+- **Postgres publishes nothing.** The api reaches it over the Compose network
+  by hostname. Its data lives in the `pgdata` volume, which `down -v` deletes;
+  backups are yours to arrange, and are the reason to consider a managed
+  database instead once the project is worth backing up.
+- **`stop_grace_period: 30s`** has to stay above `SHUTDOWN_DRAIN_MS +
+SHUTDOWN_TIMEOUT_MS`. Docker's default is 10s, which lands inside the
+  readiness drain and `SIGKILL`s the process while it is still deliberately
+  serving traffic — silently undoing the graceful shutdown on every deploy.
+- **`PORT` is fixed at 3000 inside the container** and is not the way to change
+  the published port; use `API_PUBLISHED_PORT`. Three things agree on 3000 in
+  there — the `EXPOSE`, the Dockerfile's `HEALTHCHECK` (which curls a hardcoded
+  `127.0.0.1:3000`) and the container side of the port mapping — and a `PORT`
+  line in `.env.production` would move only the app.
 
 ## Google OAuth setup
 

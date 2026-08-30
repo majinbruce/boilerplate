@@ -60,3 +60,89 @@ jobs:
           PGPASSWORD: postgres
 
       - run: npm run test:integration
+
+  # A separate job, because it needs nothing from `check` and `check` needs
+  # nothing from it — so it runs alongside instead of adding to the critical path.
+  docker:
+    runs-on: ubuntu-latest
+
+    # The smoke test below boots the image for real, and server.ts refuses to
+    # start without a reachable database. So it needs one, for the same reason
+    # the integration tests do.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Buildx is what gives us the GitHub Actions layer cache below, which is
+      # the difference between a few seconds and a full npm ci on every run.
+      - uses: docker/setup-buildx-action@v3
+
+      # `check` proves the code is correct; this proves it is shippable. They
+      # are genuinely different failures: a file the Dockerfile forgets to COPY,
+      # or an import that resolves only because the package is in
+      # devDependencies, passes every test and then breaks the deploy — which is
+      # the worst possible moment to find out.
+      - name: Build the production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: false
+          load: true
+          tags: fastify-ts-boilerplate:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Boot the image and wait for liveness
+        run: |
+          # --network host so the container can reach the Postgres service on
+          # 127.0.0.1, which is where the runner publishes it.
+          #
+          # NODE_ENV=production on purpose: it is the only way to exercise the
+          # production-only refusals in config/index.ts, so a mistake in one of
+          # them fails here rather than on the VPS. Every value below is a
+          # throwaway that exists only to satisfy the schema.
+          docker run -d --name smoke --network host \
+            -e NODE_ENV=production \
+            -e BETTER_AUTH_SECRET=ci-only-secret-not-used-for-anything-32 \
+            -e MAIL_PROVIDER=resend \
+            -e RESEND_API_KEY=ci-placeholder-never-called \
+            -e TRUST_PROXY=1 \
+            -e CORS_ORIGINS=https://example.com \
+            -e BETTER_AUTH_URL=https://api.example.com \
+            -e FRONTEND_URL=https://example.com \
+            -e PG_HOST=127.0.0.1 \
+            -e PG_USER=postgres \
+            -e PG_PASSWORD=postgres \
+            -e PG_DATABASE=app_db \
+            fastify-ts-boilerplate:ci
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/health/live; then
+              echo "image boots and reports live"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::the image never became live"
+          docker logs smoke
+          exit 1
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs smoke || true

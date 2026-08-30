@@ -38,7 +38,7 @@ const healthRoutes: FastifyPluginAsyncZod = async (app) => {
    * local case where it is genuinely useful.
    */
   const readinessSchema = z.object({
-    status: z.enum(["ready", "not ready"]),
+    status: z.enum(["ready", "not ready", "draining"]),
     uptime: z.number(),
     checks: z.object({ database: z.enum(["up", "down"]) }),
     env: z.string().optional(),
@@ -55,6 +55,24 @@ const healthRoutes: FastifyPluginAsyncZod = async (app) => {
       },
     },
     async (request, reply) => {
+      /**
+       * Shutting down is a 503 before anything else is checked, and before the
+       * database is even asked. The process is still serving in-flight requests
+       * perfectly well — this is how it tells the load balancer to stop sending
+       * new ones, which has to happen a few seconds BEFORE the socket closes if
+       * a deploy is not going to drop requests. See server.ts.
+       */
+      if (app.lifecycle.draining) {
+        reply.code(503);
+
+        return {
+          status: "draining" as const,
+          uptime: process.uptime(),
+          checks: { database: "up" as const },
+          ...(app.config.isProduction ? {} : { env: app.config.env }),
+        };
+      }
+
       let database: "up" | "down" = "down";
 
       try {

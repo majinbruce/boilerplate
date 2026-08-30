@@ -1,0 +1,150 @@
+# Production stack for a single VPS.
+#
+#   docker compose --env-file .env.production -f compose.prod.yml up -d --build
+#
+# `--env-file` is not optional and not decoration. It does two separate jobs:
+# it fills the ${...} interpolations below (Compose only ever reads that from
+# the shell or from --env-file, never from a service's `env_file:`), and it is
+# the same file the api and migrate services load into their containers. One
+# file, so the Postgres superuser Compose creates and the credentials the app
+# connects with cannot drift apart.
+#
+# .env.production is gitignored. Create it on the server from .env.example and
+# work through the "Deploying" section of the README — four settings are
+# boot-enforced in production and the app will refuse to start without them.
+#
+# This is a SEPARATE file from docker-compose.yml rather than an override of it.
+# An override can add to the dev file but cannot remove from it, and the two
+# things that make the dev stack wrong here — the bind mount of your source over
+# /app, and the published Postgres port — are exactly what an override cannot
+# take away.
+
+name: fastify-ts-boilerplate-prod
+
+# Every container gets the same log rotation. Without this, Docker's json-file
+# driver grows without limit and the first thing you learn about it is a full
+# disk at 3am on a box with no other symptoms.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    logging: *logging
+
+    # `:?` rather than a default. A default here would mean a production
+    # database quietly coming up as postgres/postgres because a line was missing
+    # from .env.production, which is the kind of thing nobody notices until it
+    # is indexed by a scanner.
+    environment:
+      POSTGRES_USER: ${PG_USER:?PG_USER is required in .env.production}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD is required in .env.production}
+      POSTGRES_DB: ${PG_DATABASE:?PG_DATABASE is required in .env.production}
+
+    # No `ports:` on purpose. The api reaches Postgres over the Compose network
+    # by hostname; publishing 5432 would put the database on the public
+    # internet. See the note on the api's port binding below for why a firewall
+    # is not the backstop you would expect it to be.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Same one-shot design as development, and it matters more here: it runs to
+  # completion BEFORE the api starts serving, it fails the deploy loudly instead
+  # of half-migrating under live traffic, and it does not race itself if you
+  # ever run two api containers.
+  migrate:
+    build:
+      context: .
+      target: runtime
+    image: fastify-ts-boilerplate:prod
+    restart: "no"
+    logging: *logging
+
+    env_file:
+      - path: .env.production
+        required: true
+
+    environment:
+      NODE_ENV: production
+      # Inside the Compose network the database is a hostname, not localhost.
+      # `environment` beats `env_file`, so this is the one thing .env.production
+      # cannot get wrong.
+      PG_HOST: postgres
+      PG_PORT: 5432
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    # drizzle-kit is a devDependency and is not in this image; the migrator
+    # ships inside drizzle-orm. See the comment at the top of the script.
+    command: ["node", "dist/scripts/migrate.js"]
+
+  api:
+    build:
+      context: .
+      target: runtime
+    image: fastify-ts-boilerplate:prod
+    restart: unless-stopped
+    logging: *logging
+
+    env_file:
+      - path: .env.production
+        required: true
+
+    environment:
+      # Pinned here even though the Dockerfile already sets it: env_file beats a
+      # Dockerfile ENV, so a stray NODE_ENV line in .env.production would
+      # otherwise silently disable every production-only guard in config —
+      # secure cookies, the CORS and mailer refusals, JSON logging. `environment`
+      # beats env_file, so this settles it.
+      NODE_ENV: production
+      PG_HOST: postgres
+      PG_PORT: 5432
+      HOST: 0.0.0.0
+      # Fixed, and deliberately not ${PORT}. Three things agree on 3000 inside
+      # this container — the EXPOSE, the Dockerfile's HEALTHCHECK (which curls
+      # a hardcoded 127.0.0.1:3000) and the right-hand side of the mapping
+      # below. A PORT line in .env.production would move only the first, so the
+      # app would listen somewhere the healthcheck and the published port are
+      # not. Change the HOST side with API_PUBLISHED_PORT instead.
+      PORT: 3000
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+    # Bound to loopback, so only a reverse proxy on this host can reach it.
+    # Only the host side moves — set API_PUBLISHED_PORT if something else on the
+    # box already has 3000. Inside the container it is always 3000.
+    #
+    # The 127.0.0.1 prefix is the entire point and is easy to drop by accident.
+    # A bare "3000:3000" publishes on 0.0.0.0, and Docker writes its own
+    # iptables rules ahead of ufw's — so the port is reachable from the internet
+    # even though `ufw status` says otherwise, and TLS, rate limiting by real
+    # client IP, and anything else your proxy does get bypassed along with it.
+    ports:
+      - "127.0.0.1:${API_PUBLISHED_PORT:-3000}:3000"
+
+    # Must exceed SHUTDOWN_DRAIN_MS + SHUTDOWN_TIMEOUT_MS (5s + 10s by default).
+    # Docker sends SIGTERM, waits this long, then SIGKILLs — and the default is
+    # 10s, which lands in the middle of the readiness drain in server.ts and
+    # kills the process while it is still deliberately serving traffic. That
+    # would silently undo the graceful shutdown on every single deploy.
+    stop_grace_period: 30s
+
+volumes:
+  pgdata:

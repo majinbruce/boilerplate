@@ -2,7 +2,7 @@ import fp from "fastify-plugin";
 import { fromNodeHeaders } from "better-auth/node";
 import type { onRequestHookHandler, preHandlerHookHandler } from "fastify";
 import { createAuth, type Auth } from "../modules/auth/auth.factory.ts";
-import { createConsoleMailer, type Mailer } from "../lib/mailer.ts";
+import { createMailer, type Mailer } from "../lib/mailer.ts";
 import { requireUser } from "../lib/require-user.ts";
 import { forbidden, unauthorized } from "../lib/errors.ts";
 
@@ -53,12 +53,14 @@ export default fp<AuthPluginOptions>(
      * — and runs its queries against the same table definitions the
      * repositories do.
      *
-     * The console mailer is the default. Swapping in a real provider is one
-     * line here — implement `Mailer` and pass it instead.
+     * The mailer is chosen by configuration, not by code: MAIL_PROVIDER picks
+     * between the console implementation (the default, which logs the link so
+     * a fresh clone works with no account anywhere) and Resend. `opts.mailer`
+     * overrides both, which is how the tests inject a fake.
      */
     const auth = createAuth({
       db: app.db,
-      mailer: opts.mailer ?? createConsoleMailer(app.log),
+      mailer: opts.mailer ?? createMailer(app.log),
       log: app.log,
     });
 

@@ -15,6 +15,17 @@ import { z } from "zod";
 
 const VALID_ENVS = ["development", "production", "test"] as const;
 
+/**
+ * The secrets this repository ships with, verbatim. They live in committed
+ * files (.env.example, .env.test), so they are public — anybody who has seen
+ * the boilerplate can forge a session cookie signed with one. Refused in
+ * production below; see that refine for why a substring check is not enough.
+ */
+const PUBLISHED_SECRETS = new Set([
+  "dev-only-better-auth-secret-change-me-32",
+  "test-only-better-auth-secret-not-used-anywhere-32",
+]);
+
 // Bracket access because `noPropertyAccessFromIndexSignature` is on: process.env
 // is an index signature, and dot access hides the fact that the key may not exist.
 const nodeEnv = process.env["NODE_ENV"] ?? "development";
@@ -128,7 +139,33 @@ const envSchema = z.object({
   COOKIE_SAME_SITE: z.enum(["lax", "strict", "none"]).default("lax"),
   COOKIE_DOMAIN: z.string().min(1).optional(),
 
+  /* ---- Mail ------------------------------------------------------------- */
+
+  /**
+   * Which Mailer implementation gets built at boot (see lib/mailer.ts).
+   *
+   *   console  log the message, send nothing — the default, so a fresh clone
+   *            runs and you copy the verification link out of your terminal
+   *   resend   the real thing, requires RESEND_API_KEY
+   *
+   * "console" is refused in production below: with verification on, a
+   * production deploy that only logs its emails is one where nobody can ever
+   * finish signing up, and the symptom (silence) points nowhere near the cause.
+   */
+  MAIL_PROVIDER: z.enum(["console", "resend"]).default("console"),
+
+  // https://resend.com/api-keys. Only read when MAIL_PROVIDER=resend, and
+  // required in that case — see the refine below.
+  RESEND_API_KEY: z.string().min(1).optional(),
+
   EMAIL_FROM: z.email().default("no-reply@example.com"),
+
+  /**
+   * Optional, and worth setting: EMAIL_FROM is typically a no-reply address on
+   * a domain you verified with the provider, and a user who hits reply on a
+   * password-reset mail should reach a human rather than /dev/null.
+   */
+  EMAIL_REPLY_TO: z.email().optional(),
 
   // Branding. Appears in the auth emails and as Better Auth's appName. Safe to
   // change at any time: cookie names come from `cookiePrefix`, which is the
@@ -146,6 +183,40 @@ const envSchema = z.object({
   PG_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
 
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+
+  /**
+   * How long to keep serving after SIGTERM while /health/ready already reports
+   * 503 — see the drain in server.ts.
+   *
+   * Absent means 5s in production and 0 locally, because the delay only buys
+   * anything when a load balancer is polling readiness, and locally it just
+   * makes Ctrl+C feel broken.
+   */
+  SHUTDOWN_DRAIN_MS: z.coerce.number().int().nonnegative().optional(),
+
+  /* ---- Error tracking --------------------------------------------------- */
+
+  /**
+   * Absent means Sentry is never initialised and nothing is sent anywhere — the
+   * same "configure it or it does not exist" shape as the Google provider, so a
+   * fresh clone runs with no account anywhere.
+   */
+  SENTRY_DSN: z.url().optional(),
+
+  // 0 disables performance tracing and only sends errors, which is what the
+  // free tier's quota is for. Raise to ~0.1 when you actually want traces.
+  SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0),
+
+  // Defaults to NODE_ENV. Set it when you run more than one deploy of the same
+  // app (staging, production) and want them separated in the dashboard.
+  SENTRY_ENVIRONMENT: z.string().min(1).optional(),
+
+  /**
+   * The build this process is running, reported to Sentry as the release so a
+   * stack trace points at a commit. Wire it in your deploy:
+   * `APP_VERSION=$(git rev-parse --short HEAD)`.
+   */
+  APP_VERSION: z.string().min(1).optional(),
 });
 
 /**
@@ -193,6 +264,50 @@ const envSchemaWithRules = envSchema
         "credentials are enabled. List your frontend origins explicitly.",
     }
   )
+  .refine((env) => env.MAIL_PROVIDER !== "resend" || Boolean(env.RESEND_API_KEY), {
+    path: ["RESEND_API_KEY"],
+    message: "RESEND_API_KEY is required when MAIL_PROVIDER=resend",
+  })
+  .refine(
+    /**
+     * The console mailer is a development affordance, not a degraded
+     * production mode. Left on in production it does not fail — it succeeds,
+     * logs the body, and every verification and password-reset link is
+     * delivered to nobody. Refusing at boot turns a silent dead end into one
+     * line at startup.
+     */
+    (env) => env.NODE_ENV !== "production" || env.MAIL_PROVIDER !== "console",
+    {
+      path: ["MAIL_PROVIDER"],
+      message:
+        "MAIL_PROVIDER=console is refused in production: it logs emails instead " +
+        "of sending them, so verification and password-reset links never arrive. " +
+        "Set MAIL_PROVIDER=resend (and RESEND_API_KEY).",
+    }
+  )
+  .refine(
+    /**
+     * The one env var whose default the boilerplate cannot supply, and the one
+     * most likely to be copied along with everything else. BETTER_AUTH_SECRET
+     * signs session tokens: a production deploy running the committed dev
+     * secret lets anyone who has read this repository mint a valid session for
+     * any user, and nothing about it looks wrong at runtime.
+     *
+     * Exact matches, not a "change-me" substring search: a real generated
+     * secret is random base64 and can contain any substring you care to look
+     * for, so a substring rule would eventually reject a perfectly good key at
+     * boot with a message the operator has no way to act on.
+     */
+    (env) =>
+      env.NODE_ENV !== "production" || !PUBLISHED_SECRETS.has(env.BETTER_AUTH_SECRET),
+    {
+      path: ["BETTER_AUTH_SECRET"],
+      message:
+        "BETTER_AUTH_SECRET is still one of the values committed to this " +
+        "repository, so it is public and anyone could forge a session. " +
+        "Generate a real one with `npm run auth:secret`.",
+    }
+  )
   .refine(
     /**
      * A production deploy is behind a proxy essentially always, and if
@@ -238,6 +353,10 @@ export const config = {
     host: env.HOST,
     bodyLimit: env.BODY_LIMIT_BYTES,
     shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS,
+    // Only useful when something is polling /health/ready, which locally
+    // nothing is — so it costs a fresh clone nothing and is on by default
+    // exactly where it matters.
+    shutdownDrainMs: env.SHUTDOWN_DRAIN_MS ?? (isProduction ? 5_000 : 0),
     trustProxy: env.TRUST_PROXY,
   },
 
@@ -299,8 +418,25 @@ export const config = {
       ...(env.COOKIE_DOMAIN === undefined ? {} : { domain: env.COOKIE_DOMAIN }),
     },
 
-    emailFrom: env.EMAIL_FROM,
     appName: env.APP_NAME,
+  },
+
+  mail: {
+    provider: env.MAIL_PROVIDER,
+    // null rather than undefined: "no key configured" is a state the mailer
+    // factory branches on, and null makes that check explicit at the call site.
+    resendApiKey: env.RESEND_API_KEY ?? null,
+    from: env.EMAIL_FROM,
+    ...(env.EMAIL_REPLY_TO === undefined ? {} : { replyTo: env.EMAIL_REPLY_TO }),
+  },
+
+  sentry: {
+    // null, not undefined: "no DSN configured" is a state instrument.ts
+    // branches on, and null makes that check explicit at the call site.
+    dsn: env.SENTRY_DSN ?? null,
+    tracesSampleRate: env.SENTRY_TRACES_SAMPLE_RATE,
+    environment: env.SENTRY_ENVIRONMENT ?? env.NODE_ENV,
+    ...(env.APP_VERSION === undefined ? {} : { release: env.APP_VERSION }),
   },
 
   db: {
