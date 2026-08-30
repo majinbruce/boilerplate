@@ -1,17 +1,36 @@
 import fp from "fastify-plugin";
 import pg from "pg";
 import type { Pool as PgPool, PoolClient, QueryResult, QueryResultRow } from "pg";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { config } from "../config/index.ts";
+import { schema } from "../db/schema.ts";
 
 const { Pool } = pg;
 
 /**
- * The typed query helper. `db.query<UserRow>(sql, params)` gives back rows
- * typed as UserRow — the row shape is asserted once, at the call site that
- * wrote the SQL, instead of being inferred by an ORM that has to be told about
- * the schema twice.
+ * `app.db` is a Drizzle instance bound to src/db/schema.ts, so a query is
+ * checked against the real column types at compile time and a renamed column
+ * is a type error rather than a runtime 500.
+ *
+ *   await db.select().from(users).where(eq(users.id, id));
+ *   await db.query.users.findFirst({ where: eq(users.id, id) });
+ *   await db.transaction(async (tx) => { ... });          // rolls back on throw
+ *   await db.execute(sql`SELECT 1`);                      // raw, still typed
  */
-export interface Database {
+export type Database = NodePgDatabase<typeof schema>;
+
+/**
+ * The driver underneath, still reachable — Drizzle is a query builder over the
+ * pool, not a replacement for it.
+ *
+ * This is the escape hatch, and it is here on purpose: recursive CTEs, `COUNT(*)
+ * OVER()`, `EXPLAIN ANALYZE` and one-off maintenance statements are all easier
+ * as SQL text than as a builder expression, and pretending otherwise is how an
+ * ORM starts costing more than it saves. `pg.query()` keeps the slow-query
+ * logging and the parameterisation; string interpolation of user input is still
+ * the one rule with no exceptions.
+ */
+export interface PgSupport {
   query<T extends QueryResultRow = QueryResultRow>(
     sql: string,
     params?: unknown[]
@@ -29,6 +48,7 @@ export interface Database {
 declare module "fastify" {
   interface FastifyInstance {
     db: Database;
+    pg: PgSupport;
   }
 }
 
@@ -101,13 +121,36 @@ export default fp(
     };
 
     /**
-     * Runs a set of statements in a single transaction, rolling back on any
-     * throw and always releasing the client.
+     * Drizzle is given a PROXY of the pool rather than the pool itself, so that
+     * every query it runs — and every query Better Auth's adapter runs through
+     * it — goes through the timing and error logging above.
      *
-     *   await app.db.withTransaction(async (client) => {
-     *     await client.query("INSERT ...", [a]);
-     *     await client.query("UPDATE ...", [b]);
-     *   });
+     * The alternative, Drizzle's own `logger` option, only sees a statement on
+     * its way out: it cannot time it, cannot know how many rows came back, and
+     * logs every query rather than the slow ones. Instrumenting the driver
+     * catches everything above it for free, which is the point of Drizzle being
+     * a thin layer over pg rather than its own client.
+     */
+    const instrumentedPool = new Proxy(pool, {
+      get(target, prop, receiver) {
+        if (prop === "query") return query;
+
+        const value: unknown = Reflect.get(target, prop, receiver);
+        // Rebound to the pool: pg's methods are not arrow functions, so a bare
+        // reference read through the proxy would lose `this`.
+        return typeof value === "function"
+          ? (value as (...args: unknown[]) => unknown).bind(target)
+          : value;
+      },
+    });
+
+    const db = drizzle(instrumentedPool, { schema });
+
+    /**
+     * Runs a set of statements in a single transaction, rolling back on any
+     * throw and always releasing the client. This is the RAW version, for the
+     * escape hatch; Drizzle queries use `db.transaction()`, which does the same
+     * thing with the builder.
      */
     const withTransaction = async <T>(
       fn: (client: PoolClient) => Promise<T>
@@ -159,7 +202,8 @@ export default fp(
       }
     };
 
-    app.decorate("db", { query, withTransaction, waitForConnection, pool });
+    app.decorate("db", db);
+    app.decorate("pg", { query, withTransaction, waitForConnection, pool });
 
     /**
      * The pool now closes itself. app.close() runs every plugin's onClose hook

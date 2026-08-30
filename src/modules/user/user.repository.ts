@@ -1,94 +1,98 @@
+import { desc, eq, ilike, or, sql } from "drizzle-orm";
 import type { Database } from "../../plugins/db.ts";
-import { config } from "../../config/index.ts";
+import { users, type UserRow } from "../../db/schema.ts";
 import type { UserDto } from "./user.schemas.ts";
 
 /**
- * Row types are `type` aliases, not interfaces, on purpose: pg's generic is
- * constrained to QueryResultRow (an index signature) and TypeScript only gives
- * type aliases an implicit index signature.
+ * Every query here is built by Drizzle against src/db/schema.ts, so the row
+ * type is inferred rather than declared: rename a column in the schema and this
+ * file stops compiling, instead of returning `undefined` at runtime.
  *
- * The table these read is owned by Better Auth — db/migrations/0001 creates it
- * and Better Auth writes to it during sign-up. Reading it with plain SQL is
- * fine and is the point of sharing one database; what this module must NOT do
- * is write anything Better Auth has invariants about (email, and the password
- * that lives over on `accounts`).
+ * The table these read is owned by Better Auth — it writes to it during sign-up
+ * through the same schema object (see auth.factory.ts). Reading it here is fine
+ * and is the point of sharing one definition; what this module must NOT do is
+ * write anything Better Auth has invariants about (email, and the password that
+ * lives over on `accounts`).
+ *
+ * Drizzle parameterises everything it builds, including the `ilike` patterns
+ * below. There is no string interpolation of user input anywhere in this file,
+ * and `sql` is only ever used for fixed fragments.
  */
-export type UserRow = {
-  id: string;
-  name: string;
-  email: string;
-  email_verified: boolean;
-  image: string | null;
-  role: "user" | "admin";
-  created_at: Date;
-  updated_at: Date;
-};
 
-// Table names are built from config, never from user input.
-const USERS = `${config.db.schema}.users`;
-
-const COLUMNS = "id, name, email, email_verified, image, role, created_at, updated_at";
-
-/**
- * Every query is parameterised ($1, $2, ...). String interpolation of user
- * input into SQL is the one rule with no exceptions here.
- */
+// Re-exported so callers keep importing the row type from the repository.
+export type { UserRow };
 
 export const findById = async (db: Database, id: string): Promise<UserRow | null> => {
-  const sql = `SELECT ${COLUMNS} FROM ${USERS} WHERE id = $1`;
+  const [row] = await db.select().from(users).where(eq(users.id, id)).limit(1);
 
-  const { rows } = await db.query<UserRow>(sql, [id]);
-  return rows[0] ?? null;
+  return row ?? null;
 };
 
 /**
  * COUNT(*) OVER() returns the total alongside the page in one round trip,
- * instead of a second COUNT query that can disagree with the first.
+ * instead of a second COUNT query that can disagree with the first. Drizzle has
+ * no builder for a window function, so it is a raw fragment — a fixed one, with
+ * the pagination and the search still parameterised.
  */
 export const list = async (
   db: Database,
   { limit, offset, search }: { limit: number; offset: number; search?: string }
 ): Promise<{ rows: UserRow[]; total: number }> => {
-  const sql = `
-    SELECT ${COLUMNS},
-           COUNT(*) OVER() AS total_count
-    FROM ${USERS}
-    WHERE ($3::text IS NULL OR name ILIKE '%' || $3 || '%' OR email ILIKE '%' || $3 || '%')
-    ORDER BY created_at DESC
-    LIMIT $1 OFFSET $2`;
+  const where =
+    search === undefined
+      ? undefined
+      : or(ilike(users.name, `%${search}%`), ilike(users.email, `%${search}%`));
 
-  const { rows } = await db.query<UserRow & { total_count: string }>(sql, [
-    limit,
-    offset,
-    search ?? null,
-  ]);
+  const rows = await db
+    .select({
+      id: users.id,
+      name: users.name,
+      email: users.email,
+      emailVerified: users.emailVerified,
+      image: users.image,
+      role: users.role,
+      createdAt: users.createdAt,
+      updatedAt: users.updatedAt,
+      totalCount: sql<string>`COUNT(*) OVER()`,
+    })
+    .from(users)
+    .where(where)
+    .orderBy(desc(users.createdAt))
+    .limit(limit)
+    .offset(offset);
 
   const first = rows[0];
-  const total = first ? Number(first.total_count) : 0;
+  const total = first ? Number(first.totalCount) : 0;
 
   return { rows, total };
 };
 
 /**
- * COALESCE lets one statement handle a partial update — absent fields are
- * passed as null and leave the existing column untouched.
+ * A partial update, without the COALESCE trick the hand-written SQL needed:
+ * Drizzle's `set` only emits the columns present in the object, so an absent
+ * field is genuinely absent from the UPDATE rather than being passed as null
+ * and coalesced back to its own value.
+ *
+ * The empty-patch case still has to be handled, because `SET updated_at = NOW()`
+ * alone is a valid statement and the route should not treat "nothing to change"
+ * as a 404.
  */
 export const update = async (
   db: Database,
   id: string,
   { name, role }: { name?: string; role?: "user" | "admin" }
 ): Promise<UserRow | null> => {
-  const sql = `
-    UPDATE ${USERS}
-    SET name       = COALESCE($2, name),
-        role       = COALESCE($3, role),
-        updated_at = NOW()
-    WHERE id = $1
-    RETURNING ${COLUMNS}`;
+  const [row] = await db
+    .update(users)
+    .set({
+      ...(name === undefined ? {} : { name }),
+      ...(role === undefined ? {} : { role }),
+      updatedAt: new Date(),
+    })
+    .where(eq(users.id, id))
+    .returning();
 
-  const { rows } = await db.query<UserRow>(sql, [id, name ?? null, role ?? null]);
-
-  return rows[0] ?? null;
+  return row ?? null;
 };
 
 /**
@@ -102,24 +106,27 @@ export const update = async (
  * have had anyway.
  */
 export const remove = async (db: Database, id: string): Promise<string | null> => {
-  const sql = `DELETE FROM ${USERS} WHERE id = $1 RETURNING id`;
+  const [row] = await db
+    .delete(users)
+    .where(eq(users.id, id))
+    .returning({ id: users.id });
 
-  const { rows } = await db.query<{ id: string }>(sql, [id]);
-  return rows[0]?.id ?? null;
+  return row?.id ?? null;
 };
 
 /**
  * The boundary between "database row" and "API resource". Keeping them apart
  * means a column rename is a one-line change here instead of a breaking API
- * change, and snake_case never escapes this file.
+ * change — and it is still worth having with Drizzle, because the inferred row
+ * type would otherwise leak straight into the response schema.
  */
 export const toDto = (row: UserRow): UserDto => ({
   id: row.id,
   name: row.name,
   email: row.email,
-  emailVerified: row.email_verified,
+  emailVerified: row.emailVerified,
   image: row.image,
   role: row.role,
-  createdAt: row.created_at.toISOString(),
-  updatedAt: row.updated_at.toISOString(),
+  createdAt: row.createdAt.toISOString(),
+  updatedAt: row.updatedAt.toISOString(),
 });

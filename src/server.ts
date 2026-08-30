@@ -10,7 +10,7 @@ const app = await buildApp();
  * and a deploy would go green on a broken instance.
  */
 try {
-  await app.db.waitForConnection();
+  await app.pg.waitForConnection();
 } catch (err) {
   app.log.fatal({ err }, "Database is mandatory — refusing to start");
   await app.close();

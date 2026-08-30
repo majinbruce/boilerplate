@@ -15,12 +15,12 @@ const run = promisify(execFile);
  *   - Real, because the things worth testing here are things a fake cannot be
  *     honest about: ON DELETE CASCADE revoking sessions, the unique index that
  *     produces the 23505 the error handler maps to 409, and Better Auth's own
- *     SQL against the column names in our migration.
+ *     queries against the tables in src/db/schema.ts.
  *   - Not a container per run, because Testcontainers means a large dependency,
  *     a Docker socket in CI, and seconds of startup — to reach a database
  *     `docker compose up` has already given you.
- *   - Separate database rather than separate schema, because the migration
- *     script's DDL is unqualified and would need a search_path dance.
+ *   - Separate database rather than separate schema, because the generated
+ *     DDL is unqualified and would need a search_path dance.
  *
  * Test files still run in PARALLEL. Isolation comes from every test minting its
  * own identity with a random email (see helpers/auth.ts), not from serialising

@@ -20,29 +20,60 @@ import authRoutes from "./modules/auth/auth.routes.ts";
 import userRoutes from "./modules/user/user.routes.ts";
 
 /**
+ * An upstream `x-request-id` is attacker-controlled until proven otherwise.
+ *
+ * Whatever comes back from here is stamped on every log line for the request as
+ * `reqId`, echoed in the `x-request-id` response header, and included in the
+ * error envelope — so an unfiltered header is a write primitive into your log
+ * store. A 2KB value bloats every line of a request; newlines forge log
+ * entries in anything that parses per-line; and the value lands in dashboards
+ * and alert payloads that may render it.
+ *
+ * The filter is a shape check, not sanitisation: an id that does not look like
+ * an id is discarded and a fresh UUID issued, so a caller can never choose the
+ * bytes. The charset covers UUIDs, W3C traceparent, and the hex/base64url ids
+ * that nginx, Envoy, ALB and Cloudflare generate.
+ */
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._~+/=-]{1,128}$/;
+
+const acceptUpstreamRequestId = (
+  header: string | string[] | undefined
+): string | null => {
+  // A repeated header arrives as an array. Two upstream ids means one of them
+  // is not upstream's, so trust neither.
+  if (typeof header !== "string") return null;
+
+  return REQUEST_ID_PATTERN.test(header) ? header : null;
+};
+
+export interface BuildAppOptions {
+  /** Injected by the tests; production uses the console mailer by default. */
+  mailer?: Mailer;
+}
+
+/**
  * Builds a fully configured app that is NOT listening on a port yet.
  *
  * This is the same app.js / server.js split as before, but in Fastify it buys
  * more: an app that isn't listening can still be sent real HTTP requests in
  * memory via app.inject(), which is how the whole test suite works.
  */
-export interface BuildAppOptions {
-  /** Injected by the tests; production uses the console mailer by default. */
-  mailer?: Mailer;
-}
-
 export async function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     // The old request_id_middleware, in one option. Honour an upstream id when
-    // a gateway already assigned one, so a trace survives the hop.
-    genReqId: (req) => {
-      const header = req.headers["x-request-id"];
-      return typeof header === "string" && header.length > 0 ? header : randomUUID();
-    },
+    // a gateway already assigned one, so a trace survives the hop — but only
+    // if it looks like an id. See acceptUpstreamRequestId below.
+    genReqId: (req) =>
+      acceptUpstreamRequestId(req.headers["x-request-id"]) ?? randomUUID(),
     bodyLimit: config.server.bodyLimit,
-    // Trust the proxy so request.ip is the client, not the load balancer —
-    // otherwise every rate limit bucket is shared by the whole internet.
-    trustProxy: true,
+    /**
+     * How far to trust X-Forwarded-For. Configured, not hard-coded `true`:
+     * blanket trust means anyone who can reach the process directly can name
+     * their own `request.ip`, and `request.ip` is the rate-limit key in front
+     * of sign-in and password reset. Set TRUST_PROXY to the number of proxy
+     * hops you actually run (see config/index.ts).
+     */
+    trustProxy: config.server.trustProxy,
     logger: {
       level: config.logLevel,
       /**

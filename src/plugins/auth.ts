@@ -47,15 +47,17 @@ export interface AuthPluginOptions {
 export default fp<AuthPluginOptions>(
   async (app, opts) => {
     /**
-     * The live instance. Note what it is given: the application's own pool, so
-     * Better Auth shares the connections, the error handling and the shutdown
-     * path that plugins/db.ts already owns.
+     * The live instance. Note what it is given: the application's own Drizzle
+     * instance, so Better Auth shares the connections, the slow-query logging,
+     * the error handling and the shutdown path that plugins/db.ts already owns
+     * — and runs its queries against the same table definitions the
+     * repositories do.
      *
      * The console mailer is the default. Swapping in a real provider is one
      * line here — implement `Mailer` and pass it instead.
      */
     const auth = createAuth({
-      pool: app.db.pool,
+      db: app.db,
       mailer: opts.mailer ?? createConsoleMailer(app.log),
       log: app.log,
     });
@@ -125,7 +127,7 @@ export default fp<AuthPluginOptions>(
   },
   {
     name: "auth",
-    // Better Auth is handed app.db.pool, so the pool must exist first.
+    // Better Auth is handed app.db, so the Drizzle instance must exist first.
     dependencies: ["db"],
   }
 );

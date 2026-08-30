@@ -29,6 +29,21 @@ const healthRoutes: FastifyPluginAsyncZod = async (app) => {
     async () => ({ status: "alive" as const, uptime: process.uptime() })
   );
 
+  /**
+   * Both probes are unauthenticated — an orchestrator cannot hold a session —
+   * so the body is deliberately the minimum an orchestrator needs. `env` used
+   * to be reported here and is not any more: naming your environment to any
+   * anonymous caller is free reconnaissance, and nothing consuming a readiness
+   * probe has ever needed it. It is still non-production-only below, for the
+   * local case where it is genuinely useful.
+   */
+  const readinessSchema = z.object({
+    status: z.enum(["ready", "not ready"]),
+    uptime: z.number(),
+    checks: z.object({ database: z.enum(["up", "down"]) }),
+    env: z.string().optional(),
+  });
+
   app.get(
     "/ready",
     {
@@ -36,27 +51,14 @@ const healthRoutes: FastifyPluginAsyncZod = async (app) => {
       schema: {
         tags: ["health"],
         summary: "Readiness probe",
-        response: {
-          200: z.object({
-            status: z.enum(["ready", "not ready"]),
-            env: z.string(),
-            uptime: z.number(),
-            checks: z.object({ database: z.enum(["up", "down"]) }),
-          }),
-          503: z.object({
-            status: z.enum(["ready", "not ready"]),
-            env: z.string(),
-            uptime: z.number(),
-            checks: z.object({ database: z.enum(["up", "down"]) }),
-          }),
-        },
+        response: { 200: readinessSchema, 503: readinessSchema },
       },
     },
     async (request, reply) => {
       let database: "up" | "down" = "down";
 
       try {
-        await app.db.query("SELECT 1");
+        await app.pg.query("SELECT 1");
         database = "up";
       } catch (err) {
         request.log.error({ err }, "readiness-check-failed");
@@ -67,9 +69,9 @@ const healthRoutes: FastifyPluginAsyncZod = async (app) => {
 
       return {
         status: healthy ? ("ready" as const) : ("not ready" as const),
-        env: app.config.env,
         uptime: process.uptime(),
         checks: { database },
+        ...(app.config.isProduction ? {} : { env: app.config.env }),
       };
     }
   );

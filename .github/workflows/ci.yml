@@ -1,0 +1,62 @@
+# Typecheck, lint and both test projects on every push and pull request.
+#
+# The integration project needs a real Postgres, so one is provided as a service
+# container — the same image docker-compose uses. `db/init/` does not run here
+# (that hook is a compose volume mount), so the workflow creates app_test
+# itself; that is the one place this file has to know something compose knows.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same branch makes the in-flight run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app_db
+        ports:
+          - 5432:5432
+        # Without this the steps below race Postgres' own bootstrap, exactly as
+        # the compose healthcheck comment describes.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # ci, not install: install the lockfile exactly, and fail if it is stale.
+      - run: npm ci
+
+      - run: npm run typecheck
+      - run: npm run lint
+
+      # No database needed, and it runs in seconds — so it reports first.
+      - run: npm run test:unit
+
+      - name: Create the test database
+        run: psql "postgres://postgres:postgres@127.0.0.1:5432/app_db" -c 'CREATE DATABASE app_test'
+        env:
+          PGPASSWORD: postgres
+
+      - run: npm run test:integration

@@ -56,6 +56,29 @@ const envSchema = z.object({
   CORS_ORIGINS: z.string().default("*"),
   BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(1_048_576),
 
+  /**
+   * How many reverse proxies sit in front of this process.
+   *
+   * `false` means "read the socket address" — right when nothing is in front of
+   * you. A number means "trust that many hops at the right-hand end of
+   * X-Forwarded-For". A CIDR or comma-separated list means "trust these peers".
+   *
+   * It is NOT a plain boolean-on by default, and that is the whole point:
+   * `trustProxy: true` trusts an X-Forwarded-For header from anybody, so a
+   * client hitting the app directly can name its own `request.ip` — and
+   * `request.ip` is the rate-limit key protecting sign-in and password reset.
+   */
+  TRUST_PROXY: z
+    .string()
+    .default("false")
+    .transform((value) => {
+      if (value === "false") return false as const;
+      if (value === "true") return true as const;
+
+      const hops = Number(value);
+      return Number.isInteger(hops) && hops > 0 ? hops : value;
+    }),
+
   RATE_LIMIT_WINDOW_MS: z.coerce
     .number()
     .int()
@@ -118,7 +141,6 @@ const envSchema = z.object({
   PG_USER: z.string().min(1),
   PG_PASSWORD: z.string(),
   PG_DATABASE: z.string().min(1),
-  PG_SCHEMA: z.string().default("public"),
   PG_POOL_MAX: z.coerce.number().int().positive().default(20),
   PG_IDLE_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(30_000),
   PG_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
@@ -146,6 +168,46 @@ const envSchemaWithRules = envSchema
     {
       path: ["COOKIE_SAME_SITE"],
       message: "COOKIE_SAME_SITE=none requires COOKIE_SECURE=true",
+    }
+  )
+  .refine(
+    /**
+     * CORS is registered with `credentials: true`, so "*" here does not mean
+     * the harmless public-API wildcard — @fastify/cors reflects whatever Origin
+     * the request carried and tells the browser to send cookies with it. Any
+     * site a signed-in user visits can then read authenticated responses.
+     *
+     * SameSite=lax blunts it today, but the split-origin deploy this
+     * boilerplate documents (`COOKIE_SAME_SITE=none`) removes that mitigation
+     * and turns it into a straightforward data-exfiltration hole. Convenient in
+     * development, never correct in production — so it is a boot error there
+     * and a permitted default everywhere else.
+     */
+    (env) =>
+      env.NODE_ENV !== "production" ||
+      !env.CORS_ORIGINS.split(",").some((origin) => origin.trim() === "*"),
+    {
+      path: ["CORS_ORIGINS"],
+      message:
+        "CORS_ORIGINS=* is refused in production: it reflects any origin while " +
+        "credentials are enabled. List your frontend origins explicitly.",
+    }
+  )
+  .refine(
+    /**
+     * A production deploy is behind a proxy essentially always, and if
+     * TRUST_PROXY is left at its safe default there, every request appears to
+     * come from the load balancer: one rate-limit bucket for the entire
+     * internet, and useless client IPs in the logs. Failing loudly beats
+     * discovering it from a credential-stuffing run that never got limited.
+     */
+    (env) => env.NODE_ENV !== "production" || env.TRUST_PROXY !== false,
+    {
+      path: ["TRUST_PROXY"],
+      message:
+        "TRUST_PROXY must be set in production — the number of proxy hops in " +
+        "front of this process (e.g. 1), or the proxy's address/CIDR. Use " +
+        "TRUST_PROXY=false only if the process is exposed directly.",
     }
   );
 
@@ -176,6 +238,7 @@ export const config = {
     host: env.HOST,
     bodyLimit: env.BODY_LIMIT_BYTES,
     shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS,
+    trustProxy: env.TRUST_PROXY,
   },
 
   logLevel: env.LOG_LEVEL ?? (isProduction ? "info" : "debug"),
@@ -246,7 +309,6 @@ export const config = {
     user: env.PG_USER,
     password: env.PG_PASSWORD,
     database: env.PG_DATABASE,
-    schema: env.PG_SCHEMA,
     max: env.PG_POOL_MAX,
     idleTimeoutMillis: env.PG_IDLE_TIMEOUT_MS,
     connectionTimeoutMillis: env.PG_CONNECT_TIMEOUT_MS,

@@ -2,7 +2,12 @@ import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../../plugins/db.ts";
 import { notFound } from "../../lib/errors.ts";
 import * as repo from "./user.repository.ts";
-import type { ListUsersQuery, UpdateUserBody, UserDto } from "./user.schemas.ts";
+import type {
+  ListUsersQuery,
+  UpdateSelfBody,
+  UpdateUserBody,
+  UserDto,
+} from "./user.schemas.ts";
 
 /**
  * Services take their dependencies as an argument instead of importing a
@@ -49,6 +54,31 @@ export const listUsers = async (
   return { data: rows.map(repo.toDto), page, limit, total };
 };
 
+/**
+ * Self-service profile update. Separate from `updateUser` below, and narrower
+ * on purpose.
+ *
+ * The route that calls this is reachable by any authenticated user acting on
+ * their own row, so `role` must be unreachable from it. Passing the request
+ * body to `updateUser` would work today only because `updateSelfBodySchema`
+ * happens to omit the field — a defence that lives in a different file, holds
+ * only while someone reading that schema understands why it is shaped that way,
+ * and fails silently if it is ever relaxed.
+ *
+ * Destructuring `name` here means the escalation is not prevented, it is
+ * unrepresentable: there is no parameter to put a role in.
+ */
+export const updateOwnProfile = async (
+  ctx: Ctx,
+  id: string,
+  { name }: UpdateSelfBody
+): Promise<UserDto> => updateUser(ctx, id, { name });
+
+/**
+ * The privileged update, reachable only from the admin-guarded route. This is
+ * the one place `role` is writable — see the permission table at the top of
+ * user.routes.ts.
+ */
 export const updateUser = async (
   { db, log }: Ctx,
   id: string,

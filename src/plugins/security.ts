@@ -40,15 +40,24 @@ export default fp(
       max: config.rateLimit.max,
       timeWindow: config.rateLimit.windowMs,
       /**
-       * Per IP in practice. This plugin is registered before the auth plugin,
-       * so its onRequest hook runs before any session has been resolved and
-       * `request.user` is still null here — the fallback is the normal path,
-       * not the exception. Kept as-is because a route that resolves its session
-       * in an earlier hook would benefit, and because bucketing by IP is the
-       * correct default for the unauthenticated endpoints that actually need
-       * rate limiting.
+       * Per IP, and only per IP.
+       *
+       * There is no `request.user?.id ?? request.ip` here, because it would be
+       * a lie: this plugin is registered before the auth plugin, so its
+       * onRequest hook runs before any session is resolved and `request.user`
+       * is null on every request that reaches this function. The user branch
+       * would never once be taken, while reading as though authenticated
+       * callers get their own bucket.
+       *
+       * Per-IP is the right default anyway — the endpoints that need limiting
+       * most (sign-in, password reset) are unauthenticated by definition. If
+       * you want per-user budgets, add a second rate-limit registration inside
+       * an authenticated scope, where the session actually exists.
+       *
+       * `request.ip` is only as trustworthy as `trustProxy` in app.ts. Set
+       * TRUST_PROXY correctly or this key is attacker-controlled.
        */
-      keyGenerator: (request) => request.user?.id ?? request.ip,
+      keyGenerator: (request) => request.ip,
       errorResponseBuilder: (request, context) => ({
         statusCode: -1,
         message: `Rate limit exceeded. Retry in ${context.after}.`,

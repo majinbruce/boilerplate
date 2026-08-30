@@ -79,7 +79,7 @@ describe("requireAuth", () => {
 
     const sessionId = before.json<{ data: { session: { id: string } } }>().data.session
       .id;
-    await app.db.query("DELETE FROM sessions WHERE id = $1", [sessionId]);
+    await app.pg.query("DELETE FROM sessions WHERE id = $1", [sessionId]);
 
     const after = await app.inject({
       method: "GET",
@@ -93,7 +93,7 @@ describe("requireAuth", () => {
   it("revokes every session when the user row is deleted", async () => {
     const { cookie, userId } = await registerAndSignIn(app, mailer);
 
-    await app.db.query("DELETE FROM users WHERE id = $1", [userId]);
+    await app.pg.query("DELETE FROM users WHERE id = $1", [userId]);
 
     const res = await app.inject({
       method: "GET",

@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildTestApp } from "../helpers.ts";
 import { createFakeMailer, type FakeMailer } from "../helpers/mailer.ts";
-import { registerAndSignIn, TRUSTED_ORIGIN, uniqueEmail } from "../helpers/auth.ts";
+import {
+  registerAndSignIn,
+  STRONG_NEW_PASSWORD,
+  STRONG_PASSWORD,
+  TRUSTED_ORIGIN,
+  uniqueEmail,
+} from "../helpers/auth.ts";
 import type { App } from "../../src/app.ts";
 
 /**
@@ -24,7 +30,7 @@ describe("email + password", () => {
   it("creates a user row and a credential account holding the hash", async () => {
     const { userId, email } = await registerAndSignIn(app, mailer);
 
-    const { rows } = await app.db.query<{
+    const { rows } = await app.pg.query<{
       email: string;
       role: string;
       provider_id: string;
@@ -54,14 +60,14 @@ describe("email + password", () => {
       method: "POST",
       url: "/api/auth/sign-up/email",
       headers: { origin: TRUSTED_ORIGIN },
-      payload: { email, password: "Password123", name: "Unverified" },
+      payload: { email, password: STRONG_PASSWORD, name: "Unverified" },
     });
 
     const signIn = await app.inject({
       method: "POST",
       url: "/api/auth/sign-in/email",
       headers: { origin: TRUSTED_ORIGIN },
-      payload: { email, password: "Password123" },
+      payload: { email, password: STRONG_PASSWORD },
     });
 
     expect(signIn.statusCode).toBe(403);
@@ -75,7 +81,7 @@ describe("email + password", () => {
       method: "POST",
       url: "/api/auth/sign-up/email",
       headers: { origin: TRUSTED_ORIGIN },
-      payload: { email, password: "Password123", name: "Verify Me" },
+      payload: { email, password: STRONG_PASSWORD, name: "Verify Me" },
     });
 
     const link = new URL(mailer.lastLink(email));
@@ -87,7 +93,7 @@ describe("email + password", () => {
       headers: { origin: TRUSTED_ORIGIN },
     });
 
-    const { rows } = await app.db.query<{ email_verified: boolean }>(
+    const { rows } = await app.pg.query<{ email_verified: boolean }>(
       "SELECT email_verified FROM users WHERE email = $1",
       [email]
     );
@@ -104,10 +110,10 @@ describe("email + password", () => {
       method: "POST",
       url: "/api/auth/sign-up/email",
       headers: { origin: TRUSTED_ORIGIN },
-      payload: { email, password: "Password123", name: "Sneaky", role: "admin" },
+      payload: { email, password: STRONG_PASSWORD, name: "Sneaky", role: "admin" },
     });
 
-    const { rows } = await app.db.query<{ role: string }>(
+    const { rows } = await app.pg.query<{ role: string }>(
       "SELECT role FROM users WHERE email = $1",
       [email]
     );
@@ -144,7 +150,7 @@ describe("email + password", () => {
       method: "POST",
       url: "/api/auth/reset-password",
       headers: { origin: TRUSTED_ORIGIN },
-      payload: { newPassword: "NewPassword456", token },
+      payload: { newPassword: STRONG_NEW_PASSWORD, token },
     });
     expect(reset.statusCode).toBe(200);
 
@@ -153,7 +159,7 @@ describe("email + password", () => {
       method: "POST",
       url: "/api/auth/sign-in/email",
       headers: { origin: TRUSTED_ORIGIN },
-      payload: { email: identity.email, password: "NewPassword456" },
+      payload: { email: identity.email, password: STRONG_NEW_PASSWORD },
     });
     expect(signIn.statusCode).toBe(200);
 
@@ -198,7 +204,7 @@ describe("google oauth", () => {
    * it later. Mocking Google's token endpoint would only test Better Auth.
    */
   it("redirects to Google with state and PKCE, and persists the state", async () => {
-    const before = await app.db.query<{ count: string }>(
+    const before = await app.pg.query<{ count: string }>(
       "SELECT COUNT(*) AS count FROM verifications"
     );
 
@@ -221,7 +227,7 @@ describe("google oauth", () => {
     expect(url.searchParams.get("code_challenge")).toBeTruthy();
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
 
-    const after = await app.db.query<{ count: string }>(
+    const after = await app.pg.query<{ count: string }>(
       "SELECT COUNT(*) AS count FROM verifications"
     );
     expect(Number(after.rows[0]?.count)).toBeGreaterThan(Number(before.rows[0]?.count));

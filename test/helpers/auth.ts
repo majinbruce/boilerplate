@@ -24,6 +24,21 @@ export interface TestIdentity {
 /** A fresh address per call. This is what keeps parallel test files isolated. */
 export const uniqueEmail = () => `test-${randomUUID()}@example.com`;
 
+/**
+ * The password every helper uses, as a constant rather than a literal repeated
+ * across files.
+ *
+ * It has to satisfy checkPasswordPolicy (see modules/auth/auth.policies.ts),
+ * which is why it is not the obvious "Password123" — that one is refused,
+ * correctly, because stripping its trailing digits leaves a denylisted word.
+ * If you tighten the policy and the whole suite goes red on sign-up, this is
+ * the line to change.
+ */
+export const STRONG_PASSWORD = "Correct-Horse-Battery-7";
+
+/** A second acceptable password, for tests that change or reset the first. */
+export const STRONG_NEW_PASSWORD = "Vermilion-Kettle-Parade-4";
+
 const collectCookies = (raw: string | string[] | undefined): string =>
   (Array.isArray(raw) ? raw : raw ? [raw] : [])
     .map((cookie) => cookie.split(";")[0])
@@ -40,7 +55,7 @@ export const registerAndSignIn = async (
   overrides: { email?: string; password?: string; name?: string } = {}
 ): Promise<TestIdentity> => {
   const email = overrides.email ?? uniqueEmail();
-  const password = overrides.password ?? "Password123";
+  const password = overrides.password ?? STRONG_PASSWORD;
   const name = overrides.name ?? "Test User";
 
   const signUp = await app.inject({
@@ -101,5 +116,5 @@ export const registerAndSignIn = async (
  * getSession picks it up because the session join re-reads the user row.
  */
 export const promoteToAdmin = async (app: App, userId: string): Promise<void> => {
-  await app.db.query("UPDATE users SET role = 'admin' WHERE id = $1", [userId]);
+  await app.pg.query("UPDATE users SET role = 'admin' WHERE id = $1", [userId]);
 };

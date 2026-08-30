@@ -1,6 +1,6 @@
 import type { FastifyRequest } from "fastify";
 import type { AuthUser } from "../plugins/auth.ts";
-import { unauthorized } from "./errors.ts";
+import { forbidden, unauthorized } from "./errors.ts";
 
 /**
  * Narrows `request.user` from `AuthUser | null` to `AuthUser`.
@@ -19,4 +19,28 @@ import { unauthorized } from "./errors.ts";
 export const requireUser = (request: FastifyRequest): AuthUser => {
   if (!request.user) throw unauthorized("Authentication required");
   return request.user;
+};
+
+/**
+ * The "self or admin" rule, for routes where the resource IS a user.
+ *
+ * This cannot be a `requireRole()`-style preHandler: the decision depends on a
+ * path parameter, so it belongs inside the handler where the target id is
+ * known and already validated. Everything else about it matches requireRole —
+ * it throws the same 403 through the same envelope.
+ *
+ * Ordering matters. An admin is allowed through before the ownership check, so
+ * an admin acting on someone else's row is not a special case at the call site.
+ */
+export const requireSelfOrAdmin = (
+  request: FastifyRequest,
+  targetUserId: string
+): AuthUser => {
+  const user = requireUser(request);
+
+  if (user.role !== "admin" && user.id !== targetUserId) {
+    throw forbidden("You do not have permission to access this user");
+  }
+
+  return user;
 };

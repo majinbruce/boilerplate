@@ -58,6 +58,14 @@ export const errorEnvelope = z.object({
   message: z.string(),
   requestId: z.string().optional(),
   details: z.array(errorDetailSchema).optional(),
+  /**
+   * Attached by the error handler outside production only. It has to be
+   * declared here even though it is a debugging aid: the response serializer
+   * emits nothing the schema does not mention, so an undeclared `stack` was
+   * silently dropped on every route with a declared error response — i.e. on
+   * exactly the routes where you would go looking for it.
+   */
+  stack: z.string().optional(),
 });
 
 export const ok = <T>(data: T, message = "Success") => ({

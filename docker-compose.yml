@@ -61,6 +61,8 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app/src:ro
+      # db/migrations is what the migrator reads — the generated .sql files plus
+      # the journal that says which of them have run.
       - ./db:/app/db:ro
     command: ["node", "src/scripts/migrate.ts"]
     restart: "no"

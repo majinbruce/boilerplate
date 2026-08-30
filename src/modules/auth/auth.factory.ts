@@ -1,10 +1,18 @@
 import type { FastifyBaseLogger } from "fastify";
-import type { Pool } from "pg";
 import { betterAuth } from "better-auth";
+import { APIError, createAuthMiddleware } from "better-auth/api";
+import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { bearer } from "better-auth/plugins";
 import { config } from "../../config/index.ts";
+import type { Database } from "../../plugins/db.ts";
+import { schema } from "../../db/schema.ts";
 import type { Mailer } from "../../lib/mailer.ts";
 import { passwordResetEmail, verificationEmail } from "./auth.emails.ts";
+import {
+  checkImageUrl,
+  checkPasswordPolicy,
+  isBreachedPassword,
+} from "./auth.policies.ts";
 
 /**
  * ============================================================================
@@ -23,10 +31,11 @@ import { passwordResetEmail, verificationEmail } from "./auth.emails.ts";
  *
  * The pieces referenced here:
  *
- *   - the adapter: passing a `pg.Pool` as `database` makes Better Auth wrap it
- *     in Kysely's PostgresDialect. It is not an ORM layer — it is a thin
- *     translation from Better Auth's abstract schema to plain parameterised
- *     SQL over the pool we already own.
+ *   - the adapter: `drizzleAdapter` hands Better Auth the application's own
+ *     Drizzle instance and the tables from src/db/schema.ts. It translates
+ *     Better Auth's abstract schema into Drizzle queries against those exact
+ *     table objects — which means its SQL and ours cannot disagree about a
+ *     column, because there is only one definition of one.
  *
  *   - plugins: a Better Auth plugin can add endpoints, database tables, request
  *     middleware and client methods. `bearer()` is a small one — it teaches the
@@ -47,13 +56,75 @@ import { passwordResetEmail, verificationEmail } from "./auth.emails.ts";
  */
 export type AuthLogger = Pick<FastifyBaseLogger, "info" | "warn" | "error" | "debug">;
 
+/**
+ * Where a plaintext password lives in the body, per endpoint.
+ *
+ * Written out rather than inferred, because "any key called password" would
+ * also match `/sign-in/email` — and running a strength check on sign-in would
+ * lock out every user who set a weak password before the rule existed, which is
+ * a self-inflicted outage rather than a security improvement. Only the paths
+ * that SET a password are listed.
+ */
+const PASSWORD_FIELD_BY_PATH: Record<string, string> = {
+  "/sign-up/email": "password",
+  "/reset-password": "newPassword",
+  "/change-password": "newPassword",
+  "/set-password": "newPassword",
+};
+
+/**
+ * Returns a reason to refuse the password in this request body, or `null` when
+ * the path does not set a password, the body does not carry one, or the
+ * password is acceptable.
+ */
+const passwordPolicyViolation = async (
+  path: string,
+  body: unknown
+): Promise<string | null> => {
+  const field = PASSWORD_FIELD_BY_PATH[path];
+
+  if (field === undefined || body === null || typeof body !== "object") return null;
+
+  const record = body as Record<string, unknown>;
+  const password = record[field];
+
+  // Missing or malformed is not this hook's problem — Better Auth's own
+  // validation produces a better message for it a moment later.
+  if (typeof password !== "string" || password === "") return null;
+
+  // Only present on sign-up. Reset and change carry a token, not an address.
+  const email = typeof record["email"] === "string" ? record["email"] : undefined;
+
+  const reason = checkPasswordPolicy(password, { email, appName: config.auth.appName });
+
+  if (reason !== null) return reason;
+
+  return (await isBreachedPassword(password))
+    ? "This password has appeared in a data breach — choose a different one"
+    : null;
+};
+
+/**
+ * Throws the 400 Better Auth's client SDK understands if the image URL is not
+ * one we are willing to store. See checkImageUrl in auth.policies.ts for why
+ * this is not left to the caller.
+ */
+const assertImageAllowed = (image: unknown): void => {
+  const reason = checkImageUrl(image, { allowInsecure: !config.isProduction });
+
+  if (reason !== null) {
+    throw new APIError("BAD_REQUEST", { message: reason, code: "INVALID_IMAGE_URL" });
+  }
+};
+
 export interface AuthDeps {
   /**
-   * The application's pool, not a private one. Better Auth declares `pg` as a
-   * peer dependency, so this is literally the same driver the repositories use:
-   * one pool to size, one place that logs connection errors, one shutdown path.
+   * The application's Drizzle instance, not a private one. It wraps the same
+   * pool the repositories use, so there is one pool to size, one place that
+   * logs connection errors and slow queries, and one shutdown path — and
+   * Better Auth's own queries show up in the same slow-query log as ours.
    */
-  pool: Pool;
+  db: Database;
   mailer: Mailer;
   log: AuthLogger;
 }
@@ -64,12 +135,28 @@ export interface AuthDeps {
  * what lets the tests supply a fake mailer and read the verification token out
  * of it instead of running a mail server.
  */
-export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
+export const createAuth = ({ db, mailer, log }: AuthDeps) =>
   betterAuth({
     appName: config.auth.appName,
 
-    /** The adapter. See the note above — this is the whole Postgres setup. */
-    database: pool,
+    /**
+     * The adapter. See the note above — this is the whole Postgres setup.
+     *
+     * `schema` is keyed by MODEL name, which is why the keys are plural: the
+     * `modelName` overrides further down rename Better Auth's models to
+     * `users` / `sessions` / `accounts` / `verifications`, and the adapter
+     * looks each one up here by that name.
+     *
+     * `transaction: true` lets multi-step operations (sign-up writes a user and
+     * an account) commit or roll back as a unit rather than leaving a user row
+     * with no way to sign in. Upstream defaults it to false because not every
+     * database it supports has transactions; Postgres does.
+     */
+    database: drizzleAdapter(db, {
+      provider: "pg",
+      schema,
+      transaction: true,
+    }),
 
     secret: config.auth.secret,
 
@@ -164,24 +251,24 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
 
     /* ---- Schema mapping -------------------------------------------------- */
     /**
-     * Better Auth's defaults are camelCase columns on tables named `user`,
-     * `session`, `account`, `verification`. Two problems: it would be the only
-     * camelCase in a snake_case database, and `user` is a reserved word in
-     * Postgres (it works only because the query builder quotes it, and every
-     * hand-written join would need `"user"` forever).
+     * Better Auth's default models are `user`, `session`, `account`,
+     * `verification`. Two problems: `user` is a reserved word in Postgres (it
+     * works only because the query builder quotes it, and every hand-written
+     * join would need `"user"` forever), and singular table names are not this
+     * database's convention. `modelName` renames each one to the table it
+     * should live in, and the `schema` passed to the adapter above is keyed by
+     * exactly these names.
      *
-     * `modelName` renames the table, `fields` maps a logical field to a column.
-     * The mapping is invisible above this file — code still says `emailVerified`
-     * — and db/migrations/0001_create_users.sql is its other half. The two must
-     * agree; that is the cost of this decision.
+     * What is NOT here any more is the `fields` mapping. Under the Kysely
+     * adapter every camelCase field had to be told its snake_case column
+     * (`emailVerified` -> `email_verified`), with a hand-written migration as
+     * the other, unchecked half — the two could silently drift, and the comment
+     * that used to sit here said so. The Drizzle adapter reads the column name
+     * off the table definition in src/db/schema.ts, so the mapping exists once,
+     * where the compiler can see it.
      */
     user: {
       modelName: "users",
-      fields: {
-        emailVerified: "email_verified",
-        createdAt: "created_at",
-        updatedAt: "updated_at",
-      },
       additionalFields: {
         /**
          * The app-level role, carried on the user row and therefore present on
@@ -210,14 +297,6 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
 
     session: {
       modelName: "sessions",
-      fields: {
-        userId: "user_id",
-        expiresAt: "expires_at",
-        ipAddress: "ip_address",
-        userAgent: "user_agent",
-        createdAt: "created_at",
-        updatedAt: "updated_at",
-      },
 
       expiresIn: config.auth.session.expiresIn,
       /**
@@ -240,18 +319,6 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
 
     account: {
       modelName: "accounts",
-      fields: {
-        userId: "user_id",
-        accountId: "account_id",
-        providerId: "provider_id",
-        accessToken: "access_token",
-        refreshToken: "refresh_token",
-        idToken: "id_token",
-        accessTokenExpiresAt: "access_token_expires_at",
-        refreshTokenExpiresAt: "refresh_token_expires_at",
-        createdAt: "created_at",
-        updatedAt: "updated_at",
-      },
 
       accountLinking: {
         enabled: true,
@@ -271,11 +338,6 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
 
     verification: {
       modelName: "verifications",
-      fields: {
-        expiresAt: "expires_at",
-        createdAt: "created_at",
-        updatedAt: "updated_at",
-      },
     },
 
     /* ---- Transport ------------------------------------------------------- */
@@ -327,6 +389,51 @@ export const createAuth = ({ pool, mailer, log }: AuthDeps) =>
         ...(config.auth.cookie.domain === undefined
           ? {}
           : { domain: config.auth.cookie.domain }),
+      },
+    },
+
+    /**
+     * Policy that Better Auth has no option for, applied at the two points
+     * where a user-controlled value is about to be written.
+     *
+     * `hooks.before` runs inside Better Auth's router, before the endpoint —
+     * which is the only place that sees a password in plaintext. By the time
+     * `databaseHooks` runs it is a scrypt hash on an `accounts` row and there is
+     * nothing left to judge.
+     */
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        const reason = await passwordPolicyViolation(ctx.path, ctx.body);
+
+        if (reason !== null) {
+          // WEAK_PASSWORD rather than a bare 400: Better Auth's client SDK
+          // surfaces `code`, so a frontend can branch on it and show the reason
+          // against the password field instead of as a toast.
+          throw new APIError("BAD_REQUEST", { message: reason, code: "WEAK_PASSWORD" });
+        }
+      }),
+    },
+
+    /**
+     * `image` is written by three different paths — sign-up, `update-user`, and
+     * the OAuth callback copying the provider's picture — so the check belongs
+     * on the write itself rather than on any one endpoint. A database hook is
+     * the only place all three converge.
+     */
+    databaseHooks: {
+      user: {
+        create: {
+          before: async (user) => {
+            assertImageAllowed(user.image);
+          },
+        },
+        update: {
+          before: async (user) => {
+            // A partial update: `image` is absent unless it is being changed,
+            // and absent is not the same as being cleared.
+            if ("image" in user) assertImageAllowed(user.image);
+          },
+        },
       },
     },
 
