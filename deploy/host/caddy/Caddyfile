@@ -62,6 +62,27 @@
 		# that renders a session does.
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "strict-origin-when-cross-origin"
+
+		# Baseline Content-Security-Policy. It is the defence-in-depth layer
+		# behind React's own escaping: if a script ever does get injected, this
+		# is what stops it phoning home or loading an attacker's payload.
+		#
+		#   default-src 'self'          nothing loads cross-origin unless allowed
+		#                               below — the browser only ever talks to
+		#                               this one origin anyway (see the design note).
+		#   script-src  adds 'unsafe-inline' because Next.js and next-themes both
+		#               emit inline bootstrap scripts and this app wires no nonce.
+		#               Tighten to a nonce/hash source if you add that plumbing.
+		#   style-src   'unsafe-inline' for the same reason — Tailwind/next-themes
+		#               inline styles and the theme class script.
+		#   img-src     https: and data: so the OAuth avatar (a Google URL) and
+		#               inlined SVG/data-URI icons render.
+		#   connect-src 'self' — every fetch is a relative path to this origin.
+		#   frame-ancestors 'self' — the CSP-native twin of X-Frame-Options.
+		#   base-uri / form-action 'self' — no off-origin <base> or form post.
+		#
+		# object-src 'none' kills the legacy plugin vector outright.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'"
 		-Server
 	}
 

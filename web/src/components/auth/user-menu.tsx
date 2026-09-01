@@ -28,8 +28,27 @@ import type { User } from "@/lib/api/schemas";
  * `useSession()` is still the right tool when a component needs to react to
  * the session CHANGING while the page is open.
  */
+/**
+ * `user.image` is whatever the identity provider handed back — for Google it is
+ * an https URL, but the DTO types it as an arbitrary string, so only render it
+ * when it is an absolute http(s) URL. Anything else (a `javascript:`/`data:`
+ * scheme, a relative path pointing back at our own origin) falls through to the
+ * initials, which is the safe default rather than a surprising `<img src>`.
+ */
+function safeImageSrc(image: string | null): string | undefined {
+  if (image === null) return undefined;
+  try {
+    const url = new URL(image);
+    return url.protocol === "https:" || url.protocol === "http:" ? image : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function UserMenu({ user }: { user: User }) {
   const router = useRouter();
+
+  const imageSrc = safeImageSrc(user.image);
 
   const initials = user.name
     .split(" ")
@@ -58,7 +77,7 @@ export function UserMenu({ user }: { user: User }) {
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="icon" className="rounded-full">
           <Avatar className="size-8">
-            {user.image === null ? null : <AvatarImage src={user.image} alt="" />}
+            {imageSrc === undefined ? null : <AvatarImage src={imageSrc} alt="" />}
             <AvatarFallback>{initials || "?"}</AvatarFallback>
           </Avatar>
           <span className="sr-only">Account menu</span>
