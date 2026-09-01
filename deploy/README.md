@@ -83,7 +83,10 @@ backups" and "I know my backups are running".
 
 ```bash
 git clone <this-repo> /srv/proj2 && cd /srv/proj2
+
+# The API's env, and the frontend's — two files, two containers.
 cp .env.example .env.production && $EDITOR .env.production
+cp web/.env.example web/.env.production && $EDITOR web/.env.production
 ```
 
 The settings that must be right for a shared box:
@@ -92,16 +95,31 @@ The settings that must be right for a shared box:
 | -------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PROJECT_SLUG`       | `proj2`                         | Namespaces the Compose project, the image tag, the volumes and the network alias. Two projects sharing it are treated as **one stack**: `up -d` on the second adopts the first's containers and its `pgdata` volume. The `:?` guard in `compose.prod.yml` makes that a startup error. |
 | `TRUST_PROXY`        | `1`                             | Exactly one proxy hop (Caddy). Without it every request appears to come from Caddy's container IP — one rate-limit bucket for the whole internet, in front of sign-in and password reset. The app refuses to boot in production without it.                                           |
-| `BETTER_AUTH_URL`    | `https://api.proj2.example.com` | The public origin. Google builds its redirect URI from it, so it must match the Cloud Console entry exactly.                                                                                                                                                                          |
-| `CORS_ORIGINS`       | your frontend origins           | `*` is refused in production — CORS runs with `credentials: true`.                                                                                                                                                                                                                    |
+| `BETTER_AUTH_URL`    | `https://proj2.example.com`     | The origin **the browser** uses — the frontend's, not an `api.` hostname. The web container serves `/api/auth/*` on that origin and Caddy routes it here. Google's redirect URI is built from this value and must match the Cloud Console entry exactly: `https://proj2.example.com/api/auth/callback/google`. |
+| `FRONTEND_URL`       | `https://proj2.example.com`     | Same origin. Every `callbackURL` is checked against `TRUSTED_ORIGINS`, which defaults to this.                                                                                                                                                                                        |
+| `CORS_ORIGINS`       | `https://proj2.example.com`     | `*` is refused in production — CORS runs with `credentials: true`. With the bundled frontend there is no cross-origin browser traffic at all, so this list is only for clients that call the API directly.                                                                            |
 | `PG_POOL_MAX`        | `10`                            | 20 is more idle backends than a 10k-user app will ever use. Not a capacity concern on this box, just tidiness.                                                                                                                                                                        |
 | `PG_PASSWORD`        | distinct per project            | Separate databases with a shared password are one leak away from being one database.                                                                                                                                                                                                  |
 | `BETTER_AUTH_SECRET` | `npm run auth:secret`           | Distinct per project, or a session minted for one is valid on the other.                                                                                                                                                                                                              |
 
+And in `web/.env.production`:
+
+| Setting     | Value                       | Why                                                                                                                                                       |
+| ----------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `APP_URL`   | `https://proj2.example.com` | Only used for metadata URLs. The browser never calls it — it calls relative paths.                                                                          |
+| `APP_NAME`  | the project's name          | Match `APP_NAME` on the API so the UI and the auth emails agree.                                                                                            |
+| `AUTH_GOOGLE_ENABLED` | `true` / `false`  | Must match whether the API has `GOOGLE_CLIENT_ID`/`SECRET` set. A button for a provider the API did not register returns a 400.                              |
+| `AUTH_REQUIRE_EMAIL_VERIFICATION` | mirror the API | Only decides which screen sign-up lands on.                                                                                              |
+
+`API_ORIGIN` is **not** in that file — `compose.prod.yml` sets it to
+`http://api:3000`, because it is a fact about the Compose network rather than a
+project setting, and it is the one thing an env file should not be able to get
+wrong.
+
 Then:
 
 ```bash
-# DNS: A record for api.proj2.example.com -> this box, and let it propagate
+# DNS: A record for proj2.example.com -> this box, and let it propagate
 #      BEFORE the first request, or Caddy burns an ACME attempt on a name
 #      that does not resolve yet.
 
@@ -135,11 +153,12 @@ ssh you@your-box
 The script is the same `git pull` + `compose up -d --build` you would type by
 hand, plus the checks that get skipped when a deploy "obviously worked": it
 refuses a force-pushed branch (`--ff-only`), waits for the new container to
-report **healthy**, hits `/health/ready` through the container to prove the app
-can reach its database, stamps the git commit into `APP_VERSION` so Sentry
-reports name the release, and prunes the dangling image layers that otherwise
-fill the disk one rebuild at a time. Any failure dumps the migrate and api logs
-and exits non-zero.
+report **healthy** — the api container and the web container both — hits
+`/health/ready` through the api container to prove the app can reach its
+database, stamps the git commit into `APP_VERSION` so Sentry reports name the
+release, and prunes the dangling image layers that otherwise fill the disk one
+rebuild at a time. Any failure dumps the migrate, api and web logs and exits
+non-zero.
 
 ## Log rotation for the cron logs
 

@@ -22,11 +22,36 @@ all in the one case you care most about.
 Any of UptimeRobot (free, 5-minute interval), Better Stack, or Healthchecks.io
 will do. Per project:
 
-- **URL:** `https://api.proj1.example.com/health/ready`
+- **URL:** `https://proj1.example.com/health/ready`
 - **Interval:** 1–5 minutes
 - **Alert after:** 2 consecutive failures — one failed poll during a deploy is
   normal and paging on it trains you to ignore the pager
 - **Expected:** HTTP 200
+
+**That path is blocked by default.** `api_defaults` in the Caddyfile answers
+`/health/*` with a 404, because the probe is for the orchestrator and
+`/health/ready` runs a database query per hit with rate limiting deliberately
+disabled — a free amplification target if left open to the internet. To let a
+monitor through, replace that `respond @health 404` with a `remote_ip` matcher
+listing the monitor's published addresses:
+
+```caddyfile
+@health_public {
+	path /health/*
+	remote_ip 1.2.3.4 5.6.7.8      # your monitor's egress ranges
+}
+@health_blocked {
+	path /health/*
+	not remote_ip 1.2.3.4 5.6.7.8
+}
+respond @health_blocked 404
+```
+
+Every provider publishes its egress ranges; UptimeRobot and Better Stack both
+do. If you would rather not maintain that list, monitor the frontend origin
+(`https://proj1.example.com/`) for a 200 instead — it proves Caddy, TLS and the
+web container, but not that the API can reach its database, which is the whole
+reason `/health/ready` exists.
 
 ### Why `/health/ready` and not `/health/live`
 

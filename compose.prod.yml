@@ -187,6 +187,55 @@ services:
         aliases:
           - ${PROJECT_SLUG}-api
 
+  # The Next.js frontend. Same shape as the api above and for the same reasons:
+  # no published port, reached by Caddy over the shared `edge` network under a
+  # per-project alias.
+  #
+  # It is a SEPARATE image from the api (`${PROJECT_SLUG}-web:prod`) built from
+  # web/Dockerfile. Nothing project-specific is baked into it — the app reads
+  # every setting at runtime on the server and has no NEXT_PUBLIC_* variables
+  # (see web/src/lib/env.ts) — so a rebuild is only needed for a code change.
+  web:
+    build:
+      context: ./web
+      target: runtime
+    image: ${PROJECT_SLUG}-web:prod
+    restart: unless-stopped
+    logging: *logging
+
+    env_file:
+      - path: web/.env.production
+        required: true
+
+    environment:
+      NODE_ENV: production
+      # Fixed for the same reason as the api's PORT: the EXPOSE, the
+      # Dockerfile HEALTHCHECK and the address Caddy proxies to all say 3001,
+      # and a PORT line in an env file would move only the app.
+      PORT: 3001
+      HOSTNAME: 0.0.0.0
+      # How SERVER components reach the API — over the private compose network,
+      # never through Caddy and never over the internet. The browser does NOT
+      # use this: it calls the relative path /api/..., which Caddy routes to the
+      # api container. Set here rather than in the env file because it is a fact
+      # about this compose network, not a project setting.
+      API_ORIGIN: http://api:3000
+
+    depends_on:
+      # Only that the api container has started. NOT `service_healthy`: the web
+      # container serves pages that do not need the API at all, and coupling its
+      # start to the API's readiness turns an API problem into a total outage.
+      api:
+        condition: service_started
+
+    stop_grace_period: 30s
+
+    networks:
+      default:
+      edge:
+        aliases:
+          - ${PROJECT_SLUG}-web
+
 volumes:
   pgdata:
 

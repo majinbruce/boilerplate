@@ -1,4 +1,5 @@
-# Typecheck, lint and both test projects on every push and pull request.
+# Typecheck, lint and both test projects on every push and pull request, then
+# the same for the Next.js app in web/ and a real build of both images.
 #
 # The integration project needs a real Postgres, so one is provided as a service
 # container — the same image docker-compose uses. `db/init/` does not run here
@@ -61,6 +62,46 @@ jobs:
 
       - run: npm run test:integration
 
+  # The frontend is a separate npm project with its own lockfile, so it gets its
+  # own job rather than extra steps in `check` — it needs no Postgres, nothing
+  # from the API's install, and a failure in one should not hide the other.
+  web:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      # `next typegen` first (it is part of the script): the PageProps and
+      # LayoutProps types are generated from the route files, so a typecheck
+      # without it checks against a stale route map.
+      - run: npm run typecheck
+      - run: npm run lint
+
+      # The build is the real test here. It is what catches a server-only module
+      # imported from a client component, a missing Suspense boundary around
+      # useSearchParams, and every other error that only exists at build time.
+      #
+      # BETTER_AUTH_SECRET is not read by this app; the env below is the
+      # frontend's own, and every value is a throwaway that only has to satisfy
+      # the Zod schema in src/lib/env.ts.
+      - run: npm run build
+        env:
+          APP_URL: https://example.com
+          API_ORIGIN: http://127.0.0.1:3000
+          APP_NAME: CI
+
   # A separate job, because it needs nothing from `check` and `check` needs
   # nothing from it — so it runs alongside instead of adding to the critical path.
   docker:
@@ -107,6 +148,20 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The frontend image, built the same way and for the same reason: a
+      # standalone output that forgets to copy .next/static passes every check
+      # above and serves an unstyled page in production.
+      - name: Build the production web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          target: runtime
+          push: false
+          load: true
+          tags: fastify-ts-web:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Boot the image and wait for liveness
         run: |
           # --network host so the container can reach the Postgres service on
@@ -123,7 +178,7 @@ jobs:
             -e RESEND_API_KEY=ci-placeholder-never-called \
             -e TRUST_PROXY=1 \
             -e CORS_ORIGINS=https://example.com \
-            -e BETTER_AUTH_URL=https://api.example.com \
+            -e BETTER_AUTH_URL=https://example.com \
             -e FRONTEND_URL=https://example.com \
             -e PG_HOST=127.0.0.1 \
             -e PG_USER=postgres \
@@ -143,6 +198,29 @@ jobs:
           docker logs smoke
           exit 1
 
+      - name: Boot the web image and wait for its health probe
+        run: |
+          docker run -d --name smoke-web -p 3001:3001 \
+            -e NODE_ENV=production \
+            -e APP_URL=https://example.com \
+            -e API_ORIGIN=http://127.0.0.1:3000 \
+            -e APP_NAME=CI \
+            fastify-ts-web:ci
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3001/healthz; then
+              echo "web image boots and reports healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::the web image never became healthy"
+          docker logs smoke-web
+          exit 1
+
       - name: Show container logs on failure
         if: failure()
-        run: docker logs smoke || true
+        run: |
+          docker logs smoke || true
+          docker logs smoke-web || true

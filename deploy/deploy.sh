@@ -16,8 +16,9 @@
 #
 #   1. git pull --ff-only        refuses to deploy a rewritten branch silently
 #   2. compose up -d --build     migrate runs to completion first (compose
-#                                dependency), then the api is replaced
-#   3. wait for HEALTHY          the Dockerfile healthcheck polling /health/live
+#                                dependency), then the api and web are replaced
+#   3. wait for HEALTHY          the Dockerfile healthchecks — the api polling
+#                                /health/live, the web container /healthz
 #   4. check /health/ready       proves the app can reach ITS database
 #   5. docker image prune -f     dangling layers only — every rebuild strands
 #                                the previous image's layers, and this is the
@@ -46,7 +47,7 @@ compose() {
 fail() {
   printf '\nDEPLOY FAILED: %s\n\n' "$*" >&2
   # The two containers whose logs explain nearly every failed deploy.
-  compose logs --tail 40 migrate api >&2 || true
+  compose logs --tail 40 migrate api web >&2 || true
   exit 1
 }
 
@@ -70,24 +71,38 @@ fi
 APP_VERSION="$(git rev-parse --short HEAD)"
 export APP_VERSION
 
-log "building and starting (migrate first, then api)"
+log "building and starting (migrate first, then api and web)"
 compose up -d --build || fail "compose up did not converge — the migrate service failing is the usual cause"
 
-log "waiting for the api container to report healthy"
+# Both containers are waited on the same way, so a frontend that builds but
+# cannot start is a failed deploy rather than a silent 502 discovered by a user.
+wait_healthy() {
+  local service="$1" cid deadline state health
+
+  cid="$(compose ps -q "$service")"
+  [[ -n "$cid" ]] || fail "no ${service} container after up -d"
+
+  log "waiting for the ${service} container to report healthy"
+
+  deadline=$((SECONDS + HEALTH_TIMEOUT_S))
+  while :; do
+    state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo missing)"
+    health="$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)"
+
+    [[ "$state" == "running" || "$state" == "created" ]] || fail "${service} container is ${state}"
+    [[ "$health" != "healthy" ]] || break
+    ((SECONDS < deadline)) || fail "${service} not healthy after ${HEALTH_TIMEOUT_S}s (last status: ${health})"
+
+    sleep 3
+  done
+}
+
+wait_healthy api
+wait_healthy web
+
+# Fetched after the wait rather than returned from it: `log` writes to stdout,
+# so capturing the function's output would capture the log lines with it.
 cid="$(compose ps -q api)"
-[[ -n "$cid" ]] || fail "no api container after up -d"
-
-deadline=$((SECONDS + HEALTH_TIMEOUT_S))
-while :; do
-  state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo missing)"
-  health="$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)"
-
-  [[ "$state" == "running" || "$state" == "created" ]] || fail "api container is ${state}"
-  [[ "$health" != "healthy" ]] || break
-  ((SECONDS < deadline)) || fail "api not healthy after ${HEALTH_TIMEOUT_S}s (last status: ${health})"
-
-  sleep 3
-done
 
 # The healthcheck above is /health/live, which deliberately checks nothing
 # external. This is the readiness probe — the one that actually asks Postgres.

@@ -9,6 +9,11 @@ with verification and reset, "Continue with Google", and one session model
 served over both httpOnly cookies (browser) and bearer tokens (everything else).
 See [How auth works here](#how-auth-works-here).
 
+A Next.js 16 frontend lives in [`web/`](web/README.md) — an empty landing page
+you replace per project, plus the complete authentication UI wired to this API.
+It is a separate npm project and a separate container. See
+[The frontend](#the-frontend).
+
 ## Quick start
 
 ```bash
@@ -36,6 +41,18 @@ gitignored. Google sign-in is optional and off until you add credentials — see
 [Google OAuth setup](#google-oauth-setup).
 
 Already using port 5432 or 3000? `PG_PUBLISHED_PORT=5433 PORT=3001 docker compose up`.
+
+The frontend runs on the host, beside it:
+
+```bash
+cd web && npm install && npm run dev      # http://localhost:3001
+```
+
+There is no `web` service in `docker-compose.yml` on purpose — `next dev` watches
+the filesystem far more happily outside a bind mount, and `next.config.ts`
+rewrites `/api/*` to `http://127.0.0.1:3000` precisely so the two processes look
+like one origin to the browser. Production is the opposite and does run it in a
+container; see [Deploying](#deploying).
 
 ### Running without Docker
 
@@ -95,6 +112,7 @@ db/init/                 runs once on first Postgres boot (creates app_test)
 test/                    app.inject() tests — the `unit` project, no database
   integration/           the `integration` project, needs a real Postgres
 .github/workflows/ci.yml typecheck, lint, both test projects
+web/                     the Next.js frontend — its own project, see web/README.md
 ```
 
 ## How auth works here
@@ -450,6 +468,80 @@ verification tokens straight out of the message.
 > interpolated value is escaped, and there is a test asserting a hostile display
 > name is escaped rather than injected. Keep that true if you edit the markup.
 
+## The frontend
+
+`web/` is a Next.js 16 app: App Router, Tailwind v4, shadcn/ui, and the complete
+authentication UI for this API. The landing page is deliberately empty — that
+one file is what each project replaces. [`web/README.md`](web/README.md) is the
+long-form version; this is the part that concerns **this** side of the wire.
+
+### One origin, two containers
+
+The browser only ever talks to one origin. Client code calls relative paths —
+`/api/auth/sign-in/email`, `/api/v1/users` — and never names this API's host.
+What forwards those paths here differs by environment:
+
+| | forwards `/api/*` | |
+| --- | --- | --- |
+| development | a rewrite in `web/next.config.ts` | `next dev` on `:3001`, this API on `:3000` |
+| production | Caddy, by path | one hostname, two upstream containers |
+
+That single decision removes three problems that a `app.` / `api.` split
+creates: there are no cross-origin browser requests, so CORS never applies; the
+session cookie is first-party, so `SameSite=None`, `COOKIE_DOMAIN` and Safari's
+tracking prevention are all irrelevant; and there is one origin for Better Auth
+to build absolute URLs from.
+
+Which is the part that catches people:
+
+```
+BETTER_AUTH_URL=https://proj1.example.com     # the FRONTEND's origin
+FRONTEND_URL=https://proj1.example.com        # the same
+TRUSTED_ORIGINS=https://proj1.example.com     # defaults to FRONTEND_URL
+```
+
+Not `api.proj1.example.com`. Better Auth builds the Google `redirect_uri`, the
+email verification link and the password reset link from `BETTER_AUTH_URL`, and
+all three have to land where the session cookie exists. Locally that is
+`http://localhost:3001` for the same reason.
+
+If a mobile client or a third party needs the API on its own hostname, add one —
+the Caddyfile has a commented block for it. It serves the same container, and
+bearer tokens resolve to the same `sessions` row a cookie would, so nothing
+about the browser flows changes.
+
+### What the frontend depends on here
+
+Four things, all of them already true — this is the list to check before
+changing them:
+
+1. **Better Auth's own response shape** on `/api/auth/*`. `auth.routes.ts`
+   passes it through untouched because the frontend uses Better Auth's client
+   SDK, which parses exactly that. Wrapping those routes in the house envelope
+   breaks every SDK call.
+2. **`GET /api/auth/me`**, in the house envelope. It is the frontend's
+   server-side session read, and its DTO is mirrored and parsed at runtime in
+   `web/src/lib/api/schemas.ts`.
+3. **`details[]` on a 400.** Each `{ field, message }` is mapped onto the form
+   input that produced it, so a `z.strictObject` rejection shows up under the
+   field rather than as a toast.
+4. **`x-request-id` on every response.** It is surfaced in the frontend's error
+   objects, so a user-reported failure is one grep on the server.
+
+### Session checks, and which one is enforcement
+
+The frontend has three layers and only the third one decides anything:
+
+1. `web/src/proxy.ts` checks whether a session **cookie exists** and redirects.
+   It never validates one — it runs on every prefetch.
+2. `requireSession()` / `requireRole()` call `GET /api/auth/me`, so the answer
+   comes from this API resolving the session against Postgres.
+3. `app.requireAuth` and `app.requireRole("admin")` on the route. **This** is
+   the permission. A forged cookie gets past layer 1 and straight into a 401.
+
+So nothing about the frontend relaxes anything here, and `role` on that side is
+display-only.
+
 ## Deploying
 
 Four settings are boot-enforced in production, because each fails silently and
@@ -457,14 +549,14 @@ expensively otherwise. The app refuses to start without them:
 
 | Variable             | Why it is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CORS_ORIGINS`       | `*` is rejected. CORS runs with `credentials: true`, so the wildcard reflects the caller's Origin **and** tells the browser to send cookies — any site a signed-in user visits can read authenticated responses. `SameSite=lax` blunts it; the split-origin deploy this README documents (`COOKIE_SAME_SITE=none`) removes that mitigation. List your frontend origins.                                                                                            |
+| `CORS_ORIGINS`       | `*` is rejected. CORS runs with `credentials: true`, so the wildcard reflects the caller's Origin **and** tells the browser to send cookies — any site a signed-in user visits can read authenticated responses. `SameSite=lax` blunts it. With the bundled frontend there is no cross-origin browser traffic at all (see [The frontend](#the-frontend)), so this list only needs the origins of clients that genuinely call the API directly — set it to your public origin and nothing else.                                                                                            |
 | `TRUST_PROXY`        | Must be set. It is how far `X-Forwarded-For` is trusted, and therefore what `request.ip` is — which is the rate-limit key in front of sign-in and password reset. `1` behind a single nginx/ALB/Cloudflare; a CIDR for specific peers; `false` only if the process is exposed directly. Blanket `true` is deliberately not the default: it trusts that header from anybody, so a client reaching the app directly can name its own IP and walk around the limiter. |
 | `BETTER_AUTH_SECRET` | The values committed to this repository (`.env.example`, `.env.test`) are rejected by exact match. The secret signs session tokens, so a deploy still running the dev default lets anyone who has read this repository mint a valid session for any user — and nothing about it looks wrong at runtime. `npm run auth:secret` generates a real one.                                                                                                                |
 | `MAIL_PROVIDER`      | `console` is rejected. It logs messages instead of sending them, so it does not error — it succeeds while every verification and password-reset link goes nowhere. Set `resend` and `RESEND_API_KEY`.                                                                                                                                                                                                                                                              |
 
 The rest of the pre-flight list:
 
-- `BETTER_AUTH_URL` — the public origin of this API. Getting it wrong is `redirect_uri_mismatch`, and only in the environment whose value is wrong.
+- `BETTER_AUTH_URL` — the origin **the browser** reaches Better Auth at. With the bundled frontend that is the frontend's public origin, not an `api.` hostname; see [The frontend](#the-frontend). Getting it wrong is `redirect_uri_mismatch`, and only in the environment whose value is wrong.
 - `MAIL_PROVIDER=resend` and `RESEND_API_KEY`, with `EMAIL_FROM` on a domain verified in Resend. Boot-enforced: the console mailer logs the verification link instead of sending it, so nobody could activate an account.
 - `npm run create-admin` — until you run it there is no admin, and every admin-only route is unreachable. See [The first administrator](#the-first-administrator).
 - Build the Dockerfile's `runtime` stage. `docker-compose.yml` is development only; `compose.prod.yml` is below.
@@ -556,6 +648,13 @@ Four details in that file are worth knowing before you edit it:
   project, the image tag, the volumes and the network alias. Two clones sharing
   it are treated as the same stack — the second `up -d` adopts the first one's
   containers and its database volume.
+- **The frontend is a second service in the same file**, built from
+  `web/Dockerfile` and tagged `${PROJECT_SLUG}-web:prod`. Same rules: no
+  published port, reached by Caddy over `edge` under the alias
+  `${PROJECT_SLUG}-web`. Its env lives in `web/.env.production` (a separate file
+  from this one), and `API_ORIGIN=http://api:3000` is set in the compose file
+  rather than that file, because it is a fact about the network rather than a
+  project setting. `deploy/deploy.sh` waits for its health probe too.
 - **Several projects on one VPS** — the shared Caddy edge, per-project
   Postgres, backups, the expired-session prune and uptime monitoring — is
   documented end to end in [`deploy/README.md`](deploy/README.md).
@@ -584,11 +683,16 @@ everything else works.
 
    | Environment | URI                                                |
    | ----------- | -------------------------------------------------- |
-   | Local       | `http://localhost:3000/api/auth/callback/google`   |
+   | Local       | `http://localhost:3001/api/auth/callback/google`   |
    | Production  | `https://your-domain.com/api/auth/callback/google` |
 
    The path is `{BETTER_AUTH_URL}{basePath}/callback/google`. It must match
    character for character — a trailing slash is a different URI.
+
+   Note the **3001**: that is the frontend, not this API. With the frontend in
+   place `BETTER_AUTH_URL` is the origin the browser uses, and the browser only
+   ever sees the frontend's — see [The frontend](#the-frontend). Running this
+   API on its own, with no `web/`, use `:3000` instead.
 
 5. Put the credentials in `.env.development`:
 

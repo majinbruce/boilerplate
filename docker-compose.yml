@@ -117,5 +117,19 @@ services:
       # package.json. `docker compose up -d --build -V` renews it.
       - /app/node_modules
 
+# There is deliberately NO `web` service here.
+#
+# The Next.js app in web/ is run on the host during development:
+#
+#     cd web && npm install && npm run dev      # http://localhost:3001
+#
+# That is not laziness about writing another service — it is the setup the app
+# is configured for. next.config.ts rewrites /api/* to http://127.0.0.1:3000
+# in development precisely so the browser stays same-origin while the two
+# processes sit on two ports, and Next's dev server watches the filesystem far
+# more happily outside a bind mount than inside one.
+#
+# Production is the opposite and does have a web service: see compose.prod.yml.
+
 volumes:
   pgdata:

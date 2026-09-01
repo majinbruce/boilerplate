@@ -50,20 +50,102 @@
 	}
 }
 
+# --- shared snippet ---------------------------------------------------------
+# Everything that should be true of every project's frontend.
+(web_defaults) {
+	# No `encode` here, unlike api_defaults: Next.js already compresses its own
+	# responses, and compressing them twice only spends CPU.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		# Clickjacking. The API serves JSON and does not need this; an HTML app
+		# that renders a session does.
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
 # --- projects ---------------------------------------------------------------
 # The upstream name is the network alias from the project's compose.prod.yml:
-# `${PROJECT_SLUG}-api`, on port 3000. It is a Docker DNS name on the `edge`
-# network, not a host port — there are no host ports.
+# `${PROJECT_SLUG}-api` on port 3000 and `${PROJECT_SLUG}-web` on port 3001.
+# Both are Docker DNS names on the `edge` network, not host ports — there are
+# no host ports.
+#
+# ONE hostname serves both, split by path. That is the whole design and it is
+# worth understanding before changing it:
+#
+#   /api/*  -> the Fastify api container
+#   /*      -> the Next.js web container
+#
+# Because the browser only ever talks to one origin, the session cookie is
+# first-party (no SameSite/ITP problems, no COOKIE_DOMAIN to get right), there
+# is no CORS preflight on any request, and BETTER_AUTH_URL is simply this
+# hostname — which is also what Google's redirect_uri must be set to.
+#
+# `handle` blocks are mutually exclusive and evaluated in the order written, so
+# the first matching one wins and only one runs. That is why the paths are
+# expressed as handles rather than as matchers on individual directives —
+# Caddy reorders directives, but it does not reorder handles.
 
-api.proj1.example.com {
-	import api_defaults
-	reverse_proxy proj1-api:3000
+proj1.example.com {
+	import web_defaults
+
+	# The web container's liveness probe, for Docker only — same reasoning as
+	# /health/* on the API. Must come before the catch-all: `handle` blocks are
+	# mutually exclusive and the FIRST match wins.
+	handle /healthz {
+		respond 404
+	}
+
+	handle /api/* {
+		import api_defaults
+		reverse_proxy proj1-api:3000
+	}
+
+	handle {
+		reverse_proxy proj1-web:3001
+	}
 }
 
-api.proj2.example.com {
-	import api_defaults
-	reverse_proxy proj2-api:3000
+proj2.example.com {
+	import web_defaults
+
+	# The web container's liveness probe, for Docker only — same reasoning as
+	# /health/* on the API. Must come before the catch-all: `handle` blocks are
+	# mutually exclusive and the FIRST match wins.
+	handle /healthz {
+		respond 404
+	}
+
+	handle /api/* {
+		import api_defaults
+		reverse_proxy proj2-api:3000
+	}
+
+	handle {
+		reverse_proxy proj2-web:3001
+	}
 }
+
+# Optional: a bare API hostname, for a mobile client or a third party that has
+# no reason to go through the frontend's origin. The SAME container, reached by
+# a second name.
+#
+# Leave it out unless you need it. Adding it means BETTER_AUTH_URL still has to
+# stay the frontend origin (the browser flows depend on it), so this name serves
+# token-based clients — Authorization: Bearer, which the API's bearer() plugin
+# resolves to the same sessions row a cookie would.
+#
+# api.proj1.example.com {
+# 	import api_defaults
+# 	reverse_proxy proj1-api:3000
+# }
 
 # --- notes that will save you an afternoon ----------------------------------
 #
@@ -76,10 +158,26 @@ api.proj2.example.com {
 #    production with TRUST_PROXY unset for exactly this reason; `1` is right
 #    here because there is exactly one proxy hop.
 #
-# 2. BETTER_AUTH_URL must be the https:// public origin — https://api.proj1.example.com.
+# 2. BETTER_AUTH_URL is the FRONTEND origin — https://proj1.example.com.
 #
-#    It is what Better Auth builds the Google redirect URI from, and it has to
-#    match the Cloud Console entry character for character.
+#    Not an api. hostname. Better Auth is served at /api/auth/* on this same
+#    origin (Caddy's `handle /api/*` above), and BETTER_AUTH_URL is what it
+#    builds absolute URLs from: the Google redirect_uri, the verification link,
+#    the reset link. Point it at a hostname the browser never visits and the
+#    OAuth callback lands somewhere with no session cookie.
+#
+#    Set the Google Cloud Console redirect URI to
+#    https://proj1.example.com/api/auth/callback/google — character for
+#    character, including the scheme and the absence of a trailing slash.
+#
+#    FRONTEND_URL and TRUSTED_ORIGINS are the same origin for the same reason.
+#
+# 2b. The frontend's own env is web/.env.production, NOT .env.production.
+#
+#    APP_URL=https://proj1.example.com and API_ORIGIN=http://api:3000 — the
+#    second is the compose network name, set in compose.prod.yml so the file
+#    cannot get it wrong. The browser never uses API_ORIGIN; it calls /api/...
+#    on this origin and Caddy routes it.
 #
 # 3. Active health checks are deliberately NOT enabled here.
 #
