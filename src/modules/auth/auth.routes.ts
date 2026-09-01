@@ -4,7 +4,7 @@ import { config } from "../../config/index.ts";
 import { errorEnvelope, ok, successEnvelope } from "../../lib/api-response.ts";
 import { badRequest } from "../../lib/errors.ts";
 import { requireUser } from "../../lib/require-user.ts";
-import { meDtoSchema } from "./auth.schemas.ts";
+import { authProvidersDtoSchema, meDtoSchema } from "./auth.schemas.ts";
 
 /**
  * Headers that must NOT be copied from Better Auth's Response onto the Fastify
@@ -140,6 +140,53 @@ const authRoutes: FastifyPluginAsyncZod = async (app) => {
       return reply.send(response.body ? await response.text() : null);
     },
   });
+
+  /**
+   * ========================================================================
+   * What this API can actually authenticate with. Public, and deliberately so.
+   * ========================================================================
+   *
+   * The sign-in screen has to decide whether to draw a "Continue with Google"
+   * button before anyone has signed in, and only this process knows the answer
+   * — the provider is registered only when both Google credentials are present
+   * (see auth.factory.ts). Duplicating that as a flag in the frontend's own
+   * environment means two settings that must agree, and the failure when they
+   * do not is a button that 400s in production.
+   *
+   * Nothing here is a secret. It is the set of front doors the building has,
+   * which anybody can see by looking at the sign-in page anyway — the client
+   * IDs, secrets and everything else stay on this side.
+   *
+   * Registered AFTER the catch-all above, and it still wins: Fastify's router
+   * matches static segments ahead of wildcards regardless of declaration order,
+   * so /api/auth/providers reaches this handler rather than Better Auth's `/*`.
+   * `/me` below works the same way.
+   */
+  app.get(
+    "/providers",
+    {
+      schema: {
+        tags: ["auth"],
+        summary: "Which sign-in methods this deployment offers",
+        description:
+          "Public. The frontend renders its sign-in screen from this, so the " +
+          "UI cannot disagree with the server about which providers exist.",
+        response: { 200: successEnvelope(authProvidersDtoSchema) },
+      },
+    },
+    async () => {
+      return ok(
+        {
+          // Add a provider to auth.factory.ts's socialProviders and it belongs
+          // here in the same edit — this list is the contract the UI reads.
+          social: config.auth.google ? ["google" as const] : [],
+          emailAndPassword: true,
+          requireEmailVerification: config.auth.requireEmailVerification,
+        },
+        "Providers retrieved successfully"
+      );
+    }
+  );
 
   /**
    * Ours, not Better Auth's — so it is documented in /docs, uses the house

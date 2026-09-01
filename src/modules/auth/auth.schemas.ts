@@ -36,3 +36,29 @@ export const meDtoSchema = z.object({
 });
 
 export type SessionUserDto = z.infer<typeof sessionUserDtoSchema>;
+
+/**
+ * What the sign-in screen needs to know before it can render itself.
+ *
+ * The frontend cannot guess this. Better Auth registers the Google provider
+ * only when GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are both set, so a
+ * "Continue with Google" button rendered against an API that has neither is a
+ * button that 400s. The alternative — a matching flag in the frontend's own
+ * environment — is two settings that must agree and silently do not.
+ *
+ * So the API declares its own capabilities and the UI follows. Same idea as
+ * NextAuth's /providers endpoint, for the same reason.
+ */
+export const authProvidersDtoSchema = z.object({
+  /** Provider ids usable with `signIn.social({ provider })`. */
+  social: z.array(z.enum(["google"])),
+  /** Whether /sign-up/email and /sign-in/email are enabled at all. */
+  emailAndPassword: z.boolean(),
+  /**
+   * Whether an unverified account can sign in. Only changes which screen the
+   * frontend shows after sign-up — the API enforces the rule either way.
+   */
+  requireEmailVerification: z.boolean(),
+});
+
+export type AuthProvidersDto = z.infer<typeof authProvidersDtoSchema>;
