@@ -20,10 +20,19 @@ Two projects live in this repository:
 - `npm run test:integration` — needs Postgres up (`docker compose up -d`)
 - `npm run lint` / `npm run lint:fix`
 - `npm run db:generate` — generate a migration after editing `src/db/schema.ts`
+- `.claude/bootstrap-plugins.sh` — **run once per machine after cloning**; installs
+  the Claude Code plugins that `.claude/settings.json` enables (see below)
 
 Before calling a change done: `npm run typecheck && npm run lint && npm run test:unit`.
 
 For the frontend, `cd web && npm run typecheck && npm run lint && npm run build`.
+
+The enabled plugins are `typescript-lsp` (wants the `typescript-language-server`
+binary — the bootstrap script installs it), `security-guidance`,
+`modern-web-guidance`, `mattpocock-skills`, `playwright` and `frontend-design`.
+`settings.json` registers the marketplace but Claude Code does not auto-install
+plugins from external sources, so a fresh clone reports them missing until the
+bootstrap script runs.
 
 ## Conventions that differ from the obvious default
 
