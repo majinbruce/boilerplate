@@ -15,6 +15,7 @@
     "create-admin": "node src/scripts/create-admin.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "node src/scripts/migrate.ts",
+    "db:prune": "node src/scripts/prune-expired.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:check": "drizzle-kit check",

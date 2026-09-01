@@ -525,22 +525,34 @@ bind mount of your source over `/app`, and the published Postgres port.
 
 Four details in that file are worth knowing before you edit it:
 
-- **The api publishes on `127.0.0.1` only**, with a reverse proxy (nginx,
-  Caddy) terminating TLS in front. Dropping the `127.0.0.1:` prefix does more
-  than expose a port: Docker writes its own iptables rules ahead of ufw's, so a
-  bare `3000:3000` is reachable from the internet while `ufw status` still says
-  it is not, and everything the proxy does — TLS, real client IPs for the rate
-  limiter — is bypassed with it.
-- **Postgres publishes nothing.** The api reaches it over the Compose network
-  by hostname. Its data lives in the `pgdata` volume, which `down -v` deletes;
-  backups are yours to arrange, and are the reason to consider a managed
-  database instead once the project is worth backing up.
+- **Nothing is published on the host at all**, not even on loopback. Caddy
+  reaches the api over a shared `edge` Docker network by the alias
+  `${PROJECT_SLUG}-api`, and terminates TLS in front. This is stricter than
+  binding to `127.0.0.1` and removes a whole class of mistake: Docker writes
+  its own iptables rules ahead of ufw's, so a port published on `0.0.0.0` by
+  accident is reachable from the internet while `ufw status` still says it is
+  not — and a port that was never published cannot be. It also means there is
+  no port to allocate when a second project lands on the same box.
+- **Postgres publishes nothing** and is on the project's private network only,
+  so no other project can reach it. Its data lives in the `pgdata` volume,
+  which `down -v` deletes. Backups are **not** optional and are no longer left
+  to you: `deploy/host/backup/` has a nightly `pg_dump` that discovers every project
+  on the box by Docker label, verifies each dump is a readable archive, syncs
+  offsite, and reports to a dead-man's switch. Set it up before the project is
+  worth backing up, not after.
+- **`PROJECT_SLUG` must be distinct per clone.** It namespaces the Compose
+  project, the image tag, the volumes and the network alias. Two clones sharing
+  it are treated as the same stack — the second `up -d` adopts the first one's
+  containers and its database volume.
+- **Several projects on one VPS** — the shared Caddy edge, per-project
+  Postgres, backups, the expired-session prune and uptime monitoring — is
+  documented end to end in [`deploy/README.md`](deploy/README.md).
 - **`stop_grace_period: 30s`** has to stay above `SHUTDOWN_DRAIN_MS +
 SHUTDOWN_TIMEOUT_MS`. Docker's default is 10s, which lands inside the
   readiness drain and `SIGKILL`s the process while it is still deliberately
   serving traffic — silently undoing the graceful shutdown on every deploy.
 - **`PORT` is fixed at 3000 inside the container** and is not the way to change
-  the published port; use `API_PUBLISHED_PORT`. Three things agree on 3000 in
+  the port Caddy proxies to. Three things agree on 3000 in
   there — the `EXPOSE`, the Dockerfile's `HEALTHCHECK` (which curls a hardcoded
   `127.0.0.1:3000`) and the container side of the port mapping — and a `PORT`
   line in `.env.production` would move only the app.

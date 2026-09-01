@@ -1,0 +1,84 @@
+# One site block per project. Adding a project is: create the DNS record, copy
+# the block, `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile`.
+#
+# Certificates are issued and renewed automatically the first time a name is
+# requested over HTTPS. There is nothing to run and nothing to cron.
+{
+	# Where Let's Encrypt sends expiry warnings if renewal ever stops working.
+	# Set it to an address you actually read — it is the only channel that tells
+	# you about a certificate problem before users see it.
+	email you@example.com
+
+	# Uncomment to issue from the staging CA while you are getting DNS right.
+	# Staging certificates are untrusted by browsers, but they do not count
+	# against the production rate limit — which is worth remembering after the
+	# third failed attempt on a name that is only 5-per-week.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# --- shared snippet ---------------------------------------------------------
+# Everything that should be true of every project's API, defined once.
+(api_defaults) {
+	encode zstd gzip
+
+	header {
+		# HSTS. Only meaningful once you are sure every hostname under this
+		# domain is HTTPS-only — it is hard to walk back, because browsers
+		# remember it for max-age regardless of what you serve later.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		# The API serves JSON, and a browser that sniffs a JSON response into
+		# something executable is the one interesting attack on it.
+		X-Content-Type-Options "nosniff"
+
+		# Not a secret, but there is no reason to advertise the proxy version.
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# --- projects ---------------------------------------------------------------
+# The upstream name is the network alias from the project's compose.prod.yml:
+# `${PROJECT_SLUG}-api`, on port 3000. It is a Docker DNS name on the `edge`
+# network, not a host port — there are no host ports.
+
+api.proj1.example.com {
+	import api_defaults
+	reverse_proxy proj1-api:3000
+}
+
+api.proj2.example.com {
+	import api_defaults
+	reverse_proxy proj2-api:3000
+}
+
+# --- notes that will save you an afternoon ----------------------------------
+#
+# 1. TRUST_PROXY=1 in every project's .env.production.
+#
+#    Caddy sets X-Forwarded-For and terminates TLS, so without this the app
+#    sees the proxy's container IP as `request.ip` for every request on the
+#    box — meaning ONE rate-limit bucket shared by the entire internet, in
+#    front of sign-in and password reset. The app's config refuses to boot in
+#    production with TRUST_PROXY unset for exactly this reason; `1` is right
+#    here because there is exactly one proxy hop.
+#
+# 2. BETTER_AUTH_URL must be the https:// public origin — https://api.proj1.example.com.
+#
+#    It is what Better Auth builds the Google redirect URI from, and it has to
+#    match the Cloud Console entry character for character.
+#
+# 3. Active health checks are deliberately NOT enabled here.
+#
+#    Adding `health_uri /health/ready` to a reverse_proxy looks like an
+#    upgrade, and with more than one upstream it would be. With ONE upstream it
+#    inverts: /health/ready reports 503 when the database is unreachable, Caddy
+#    marks the only backend down, and every request 502s at the proxy —
+#    including the routes that need no database, and including the readiness
+#    probe your monitoring is reading. A brief database blip becomes a total
+#    outage plus a blind spot. Turn it on the day you run two api containers,
+#    not before.
