@@ -29,13 +29,29 @@
       "Bash(wc*)",
       "Bash(find*)",
       "Bash(grep*)",
-      "Bash(rg*)"
+      "Bash(rg*)",
+      "Bash(cd web && npm run typecheck)",
+      "Bash(cd web && npm run lint)",
+      "Bash(cd web && npm run lint:fix)",
+      "Bash(cd web && npm run format)",
+      "Bash(cd web && npm run build)",
+      "Bash(npm run typecheck --prefix web)",
+      "Bash(npm run lint --prefix web)",
+      "Bash(npm run lint:fix --prefix web)",
+      "Bash(npm run format --prefix web)",
+      "Bash(npm run build --prefix web)",
+      "Bash(npx shadcn@latest add*)",
+      "Bash(npx next typegen*)"
     ],
     "deny": [
       "Edit(db/migrations/**)",
       "Write(db/migrations/**)",
       "Edit(package-lock.json)",
-      "Write(package-lock.json)"
+      "Write(package-lock.json)",
+      "Edit(web/package-lock.json)",
+      "Write(web/package-lock.json)",
+      "Edit(web/.next/**)",
+      "Write(web/.next/**)"
     ]
   },
   "hooks": {

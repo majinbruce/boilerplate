@@ -2,7 +2,12 @@ import eslint from "@eslint/js";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist/**", "node_modules/**", "logs/**"] },
+  // `web/**` is the Next.js app: a separate npm project with its own flat
+  // config, its own plugins and its own tsconfig. Linting it from here would
+  // apply the API's type-aware rules against a tsconfig that does not include
+  // those files — which crashes the React plugin rather than reporting
+  // anything. Run `npm run lint` inside web/ instead; CI has a job for it.
+  { ignores: ["dist/**", "node_modules/**", "logs/**", "web/**"] },
   eslint.configs.recommended,
 
   // Type-aware linting: these rules read the type checker, which is what

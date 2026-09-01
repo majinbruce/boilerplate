@@ -3,6 +3,15 @@
 Cloned as the starting point for new projects. Keep these rules intact when
 adding features; `README.md` has the long-form reasoning behind each one.
 
+Two projects live in this repository:
+
+- **the API** — this directory. Everything below applies to it.
+- **the frontend** — `web/`, a Next.js 16 app. It has its OWN package.json,
+  lockfile, tsconfig, eslint config, Dockerfile and `CLAUDE.md`. Read
+  `web/CLAUDE.md` before touching anything under `web/`; none of the rules
+  below apply there, and none of its rules apply here. Nothing imports across
+  the boundary — the only contract between them is HTTP.
+
 ## Commands
 
 - `npm run dev` — Node runs `.ts` directly (type stripping), no tsx/ts-node
@@ -13,6 +22,8 @@ adding features; `README.md` has the long-form reasoning behind each one.
 - `npm run db:generate` — generate a migration after editing `src/db/schema.ts`
 
 Before calling a change done: `npm run typecheck && npm run lint && npm run test:unit`.
+
+For the frontend, `cd web && npm run typecheck && npm run lint && npm run build`.
 
 ## Conventions that differ from the obvious default
 
@@ -62,6 +73,30 @@ value is missing from a response, check the schema before debugging the handler.
 **7. Errors: throw the helpers in `src/lib/errors.ts`** (`notFound`, `badRequest`,
 `conflict`, …). The error handler plugin renders the envelope. Return
 `ok(data, message)` / `paginated(...)` from `src/lib/api-response.ts` on success.
+
+## The frontend contract
+
+The four things about `web/` that this side has to hold up, in one place:
+
+1. **`BETTER_AUTH_URL` is the FRONTEND's origin**, not an `api.` hostname. The
+   Next app serves `/api/auth/*` on its own origin and forwards it here (a
+   rewrite in development, Caddy in production), so the browser only ever sees
+   one origin. Better Auth builds the Google `redirect_uri`, the verification
+   link and the reset link from this value, and all three have to land where the
+   session cookie is. `FRONTEND_URL` and `TRUSTED_ORIGINS` are that same origin.
+2. **Better Auth's response shape is load-bearing.** `auth.routes.ts` returns it
+   untouched because the frontend's Better Auth client SDK parses exactly that.
+   Wrapping those routes in the house envelope breaks every SDK call.
+3. **`GET /api/auth/providers` is public and is how the UI knows what to draw.**
+   The frontend does not carry its own "is Google enabled" flag — it asks. Add a
+   provider to `socialProviders` in `auth.factory.ts` and add it to that route's
+   `social` list in the same edit, or the button never appears.
+4. **`GET /api/auth/me` is the frontend's session read**, in the house envelope.
+   Its DTO is mirrored in `web/src/lib/api/schemas.ts` and parsed at runtime —
+   change the DTO here and change it there in the same commit.
+5. **`details[]` on a 400 is a UI feature.** The frontend maps each
+   `{ field, message }` onto the form field that produced it, so a strict-object
+   rejection shows up under the input rather than as a toast.
 
 ## Security invariants — do not relax without being asked
 

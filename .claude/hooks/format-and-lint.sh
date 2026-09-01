@@ -7,6 +7,10 @@
 #
 # The hook payload is parsed with node, not jq: this repo is cloned onto fresh
 # machines where node is guaranteed by definition and jq often is not.
+#
+# It covers BOTH projects in this repo. The API and the Next.js app in web/ are
+# separate npm installs with separate prettier and eslint configs, so the file's
+# path decides which toolchain runs on it.
 set -uo pipefail
 
 input=$(cat)
@@ -25,10 +29,35 @@ file_path=$(node -e '
 
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 
-# Only TypeScript sources; everything else is none of this hook's business.
-[[ "$file_path" == *.ts ]] || exit 0
+# TypeScript sources only, .tsx included — everything else is none of this
+# hook's business.
+[[ "$file_path" == *.ts || "$file_path" == *.tsx ]] || exit 0
 
 cd "$project_dir" || exit 0
+[[ -f "$file_path" ]] || exit 0
+
+# Which project owns this file, and therefore whose eslint and prettier config
+# applies. eslint resolves its flat config from the CWD, so running the API's
+# binary over a .tsx file would lint it against rules that know nothing about
+# React — and vice versa.
+#
+# The path arrives absolute from the hook payload but may be relative if it was
+# typed; normalise before matching.
+case "$file_path" in
+  /*) rel="${file_path#"$project_dir"/}" ;;
+  *) rel="$file_path" ;;
+esac
+
+if [[ "$rel" == web/* ]]; then
+  workspace="$project_dir/web"
+  target="${rel#web/}"
+else
+  workspace="$project_dir"
+  target="$rel"
+fi
+
+cd "$workspace" || exit 0
+file_path="$target"
 [[ -f "$file_path" ]] || exit 0
 
 # A fresh clone with no install yet must not turn every edit into a hook failure.
