@@ -40,7 +40,9 @@ const healthRoutes: FastifyPluginAsyncZod = async (app) => {
   const readinessSchema = z.object({
     status: z.enum(["ready", "not ready", "draining"]),
     uptime: z.number(),
-    checks: z.object({ database: z.enum(["up", "down"]) }),
+    // "skipped" appears only while draining, where the database is deliberately
+    // not asked — reporting "up" there would be a claim nobody checked.
+    checks: z.object({ database: z.enum(["up", "down", "skipped"]) }),
     env: z.string().optional(),
   });
 
@@ -68,7 +70,7 @@ const healthRoutes: FastifyPluginAsyncZod = async (app) => {
         return {
           status: "draining" as const,
           uptime: process.uptime(),
-          checks: { database: "up" as const },
+          checks: { database: "skipped" as const },
           ...(app.config.isProduction ? {} : { env: app.config.env }),
         };
       }

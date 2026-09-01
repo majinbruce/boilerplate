@@ -17,7 +17,13 @@ services:
     ports:
       # Override PG_PUBLISHED_PORT if you already have something on 5432.
       # Only the host side moves — inside the compose network it is always 5432.
-      - "${PG_PUBLISHED_PORT:-5432}:5432"
+      #
+      # Bound to loopback, not 0.0.0.0. These are default credentials, and
+      # Docker's iptables rules run ahead of ufw's — so on any internet-facing
+      # box an unqualified publish is an open database regardless of what
+      # `ufw status` says. Loopback keeps psql/GUI access from the host working
+      # and costs nothing locally.
+      - "127.0.0.1:${PG_PUBLISHED_PORT:-5432}:5432"
     volumes:
       # Named volume: the data survives `docker compose down`. Use
       # `down -v` when you actually want a clean database.

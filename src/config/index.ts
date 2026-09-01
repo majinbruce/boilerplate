@@ -310,6 +310,43 @@ const envSchemaWithRules = envSchema
   )
   .refine(
     /**
+     * Every verification link, reset link and OAuth redirect is built from
+     * BETTER_AUTH_URL, and the browser lands on FRONTEND_URL afterwards. An
+     * http:// value in production means credentials-adjacent links travel in
+     * plaintext, secure cookies never attach, and Google answers with
+     * redirect_uri_mismatch — three failures whose common cause is one
+     * character of one env var. TRUSTED_ORIGINS only refuses http:// entries
+     * rather than requiring https://, because a mobile app's custom scheme
+     * (myapp://) is a legitimate trusted origin.
+     */
+    (env) => env.NODE_ENV !== "production" || env.BETTER_AUTH_URL.startsWith("https://"),
+    {
+      path: ["BETTER_AUTH_URL"],
+      message: "BETTER_AUTH_URL must be an https:// origin in production",
+    }
+  )
+  .refine(
+    (env) => env.NODE_ENV !== "production" || env.FRONTEND_URL.startsWith("https://"),
+    {
+      path: ["FRONTEND_URL"],
+      message: "FRONTEND_URL must be an https:// origin in production",
+    }
+  )
+  .refine(
+    (env) =>
+      env.NODE_ENV !== "production" ||
+      !(env.TRUSTED_ORIGINS ?? "")
+        .split(",")
+        .some((origin) => origin.trim().startsWith("http://")),
+    {
+      path: ["TRUSTED_ORIGINS"],
+      message:
+        "TRUSTED_ORIGINS must not contain http:// origins in production — " +
+        "callbackURLs redirected to them would carry auth results over plaintext",
+    }
+  )
+  .refine(
+    /**
      * A production deploy is behind a proxy essentially always, and if
      * TRUST_PROXY is left at its safe default there, every request appears to
      * come from the load balancer: one rate-limit bucket for the entire

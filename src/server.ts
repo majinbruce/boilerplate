@@ -38,7 +38,14 @@ try {
  */
 let shuttingDown = false;
 
-const shutdown = async (signal: string) => {
+/**
+ * `exitCode` is what a clean shutdown exits with: 0 for a signal, 1 when the
+ * trigger was a crash (see unhandledRejection below). Without it, a rejection
+ * that drained gracefully would exit 0 and look like a deliberate stop to
+ * anything counting non-zero exits — the restart policy does not care, but
+ * monitoring does.
+ */
+const shutdown = async (signal: string, exitCode = 0) => {
   if (shuttingDown) return;
   shuttingDown = true;
 
@@ -80,7 +87,7 @@ const shutdown = async (signal: string) => {
 
     await app.close();
     await flushSentry();
-    process.exit(0);
+    process.exit(exitCode);
   } catch (err) {
     app.log.error({ err }, "Error during shutdown");
     await flushSentry();
@@ -107,8 +114,10 @@ process.on("uncaughtException", (err) => {
 
 process.on("unhandledRejection", (reason) => {
   app.log.fatal({ err: reason }, "Unhandled rejection — exiting");
+  // The .finally is the backstop for the case where a shutdown is already in
+  // flight and this call returns immediately.
   void captureFatal(reason)
-    .then(() => shutdown("unhandledRejection"))
+    .then(() => shutdown("unhandledRejection", 1))
     .finally(() => process.exit(1));
 });
 

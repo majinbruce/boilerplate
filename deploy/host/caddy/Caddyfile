@@ -19,6 +19,15 @@
 # --- shared snippet ---------------------------------------------------------
 # Everything that should be true of every project's API, defined once.
 (api_defaults) {
+	# Health probes are for the orchestrator, not the internet. The Docker
+	# HEALTHCHECK reaches the app inside the container and never crosses the
+	# proxy, so nothing external needs these — and /health/ready runs a database
+	# query per hit with rate limiting deliberately disabled, which makes it a
+	# free amplification target if left public. If an external monitor must poll
+	# it, replace this with a `remote_ip` matcher listing the monitor's addresses.
+	@health path /health/*
+	respond @health 404
+
 	encode zstd gzip
 
 	header {

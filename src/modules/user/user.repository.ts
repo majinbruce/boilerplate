@@ -29,6 +29,16 @@ export const findById = async (db: Database, id: string): Promise<UserRow | null
 };
 
 /**
+ * `%` and `_` are wildcards inside a LIKE pattern even when the pattern itself
+ * is a bind parameter — parameterisation stops injection, not pattern
+ * metacharacters. Unescaped, a search for "%" matches every row and a search
+ * for "100%_guaranteed" matches things it should not; escaped, the characters
+ * mean themselves. Backslash is Postgres' default LIKE escape character, and it
+ * must be escaped first so it cannot un-escape the other two.
+ */
+const escapeLikePattern = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
+
+/**
  * COUNT(*) OVER() returns the total alongside the page in one round trip,
  * instead of a second COUNT query that can disagree with the first. Drizzle has
  * no builder for a window function, so it is a raw fragment — a fixed one, with
@@ -38,10 +48,12 @@ export const list = async (
   db: Database,
   { limit, offset, search }: { limit: number; offset: number; search?: string }
 ): Promise<{ rows: UserRow[]; total: number }> => {
+  const pattern = search === undefined ? undefined : `%${escapeLikePattern(search)}%`;
+
   const where =
-    search === undefined
+    pattern === undefined
       ? undefined
-      : or(ilike(users.name, `%${search}%`), ilike(users.email, `%${search}%`));
+      : or(ilike(users.name, pattern), ilike(users.email, pattern));
 
   const rows = await db
     .select({

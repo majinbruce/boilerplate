@@ -13,6 +13,11 @@
 #
 set -Eeuo pipefail
 
+# Every file this script creates is a full logical copy of a production
+# database — user emails, password hashes, session tokens. Owner-only, always;
+# the default umask would leave them world-readable in /var/backups.
+umask 077
+
 CONFIG_FILE="${PG_BACKUP_CONFIG:-/etc/pg-backup.env}"
 # shellcheck source=/dev/null
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
