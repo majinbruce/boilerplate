@@ -117,6 +117,30 @@ postgres service carries `backup.enable=true` and `backup.project=${PROJECT_SLUG
 labels, and `pg-backup.sh` discovers containers by label. The one per-project
 line you do have to add by hand is the weekly prune in the crontab.
 
+## Deploying an update
+
+The flow is deliberately manual: push from your machine, then ssh and run one
+script. No webhook and no CD agent means nothing on the box holds credentials
+that can write to your repo, and a bad deploy always has a human watching it.
+
+```bash
+# on your machine
+git push
+
+# on the server — from anywhere, the script finds its own project root
+ssh you@your-box
+/srv/proj1/deploy/deploy.sh
+```
+
+The script is the same `git pull` + `compose up -d --build` you would type by
+hand, plus the checks that get skipped when a deploy "obviously worked": it
+refuses a force-pushed branch (`--ff-only`), waits for the new container to
+report **healthy**, hits `/health/ready` through the container to prove the app
+can reach its database, stamps the git commit into `APP_VERSION` so Sentry
+reports name the release, and prunes the dangling image layers that otherwise
+fill the disk one rebuild at a time. Any failure dumps the migrate and api logs
+and exits non-zero.
+
 ## Log rotation for the cron logs
 
 Docker's own logs are capped by the `json-file` options in each compose file.

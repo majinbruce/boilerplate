@@ -518,6 +518,18 @@ credentials the app connects with cannot drift apart. Create
 `.env.production` on the server from `.env.example` — it is gitignored — and
 work through the pre-flight list above.
 
+That command is the **first** deploy. Routine updates are `git push` from your
+machine, then on the server:
+
+```sh
+./deploy/deploy.sh
+```
+
+— the same pull + rebuild, plus the verification steps nobody types by hand:
+waits for the container to come up healthy, proves `/health/ready` through it,
+stamps the commit into `APP_VERSION` for Sentry, and prunes dangling images.
+See "Deploying an update" in [`deploy/README.md`](deploy/README.md).
+
 It is a separate file rather than an override of `docker-compose.yml`, because
 an override can add to the dev file but cannot remove from it, and the two
 things that make the dev stack wrong in production are exactly removals: the

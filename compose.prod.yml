@@ -137,6 +137,12 @@ services:
       # line in .env.production would move only the first, so the app would
       # listen somewhere the healthcheck and the proxy are not.
       PORT: 3000
+      # The commit this build came from, reported to Sentry as the release so a
+      # stack trace points at code. deploy/deploy.sh exports it from git before
+      # `up`; "unknown" is what an up run outside the script honestly is. (An
+      # APP_VERSION line in .env.production also fills it — interpolation reads
+      # the --env-file — but the exported value wins.)
+      APP_VERSION: ${APP_VERSION:-unknown}
 
     depends_on:
       postgres:
